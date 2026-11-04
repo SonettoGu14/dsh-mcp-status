@@ -1,0 +1,55 @@
+{
+  "name": "dsh-mcp-panel",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "DSH Web GUI 的 MCP 服务器面板：在侧边栏查看每个 MCP 服务器的连接状态、工具数量与配置，并可直接开关、重试连接。",
+  "license": "MIT",
+  "author": "SonettoGu14",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "mcp",
+    "model-context-protocol",
+    "sidebar",
+    "web-ui"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SonettoGu14/dsh-mcp-panel.git"
+  },
+  "homepage": "https://github.com/SonettoGu14/dsh-mcp-panel#readme",
+  "bugs": {
+    "url": "https://github.com/SonettoGu14/dsh-mcp-panel/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/probe.js",
+    "lib/probe.test.mjs",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "README.md",
+    "LICENSE",
+    "icon.svg"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  }
+}
