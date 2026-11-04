@@ -1,25 +1,25 @@
 /**
- * dsh-mcp-panel — 浏览器半体。
+ * dsh-mcp-status — 浏览器半体。
  *
  * 两个座位：
  *   - `sidebar.panellist`：侧边栏里的一行（id 与面板 id 相同）；
  *   - `main`（keyed，key = 面板 id）：中央面板本体。
  *
- * 纯 DOM/React 渲染，无构建步骤；数据全部来自宿主路由 `/api/dsh-mcp-panel/*`，
+ * 纯 DOM/React 渲染，无构建步骤；数据全部来自宿主路由 `/api/dsh-mcp-status/*`，
  * 面板只负责把「有哪些服务器、各自连上没有、配置是什么」讲清楚，并把开关/测试动作转给宿主。
  * 样式只用 `--dsw-alias-*` 主题令牌，随宿主明暗主题切换。
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-mcp-panel',
+  id: 'dsh-mcp-status',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
     const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
-    const NS = 'dsh-mcp-panel';
+    const NS = 'dsh-mcp-status';
     const PANEL_ID = 'mcp';
     const PANEL_ORDER = 40;
-    const API = '/api/dsh-mcp-panel';
+    const API = '/api/dsh-mcp-status';
     const POLL_MS = 4000;
 
     /* ------------------------------------------------------------------ *
@@ -626,7 +626,7 @@ window.__ModuleLoader__.load({
       name: NS,
       inject: ['slots', 'locale'],
       apply(ctx) {
-        ctx.effect(() => ctx.locale.register(NS, { zh: ZH, en: EN }), 'dsh-mcp-panel: dictionaries');
+        ctx.effect(() => ctx.locale.register(NS, { zh: ZH, en: EN }), 'dsh-mcp-status: dictionaries');
         const t = ctx.locale.bind(NS);
 
         ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({

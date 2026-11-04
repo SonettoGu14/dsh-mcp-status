@@ -1,4 +1,4 @@
-# dsh-mcp-panel
+# dsh-mcp-status
 
 DeepSeek Harness Web GUI 的 **MCP 服务器面板**：在侧边栏里看清「有哪些 MCP 服务器、各自连上没有、配置是什么」，并原地开关和重连。
 
@@ -21,10 +21,10 @@ An MCP server panel for the DeepSeek Harness Web GUI: it lists every `@deepseek-
 
 | 路由 | 作用 |
 | --- | --- |
-| `GET /api/dsh-mcp-panel/servers` | 快照：每行的状态、工具数、传输与地址、来源补丁文件、超时与重连策略 |
-| `POST /api/dsh-mcp-panel/toggle` | `{ id, enabled }`：改补丁行 → 等热重载 → 返回新状态（超时后主动重排一次） |
-| `POST /api/dsh-mcp-panel/retry` | `{ id }`：重新挂载这一行（= 重新连接） |
-| `POST /api/dsh-mcp-panel/test` | `{ id }`：真握手，返回协议版本 / serverInfo / 工具数 / 失败原因 |
+| `GET /api/dsh-mcp-status/servers` | 快照：每行的状态、工具数、传输与地址、来源补丁文件、超时与重连策略 |
+| `POST /api/dsh-mcp-status/toggle` | `{ id, enabled }`：改补丁行 → 等热重载 → 返回新状态（超时后主动重排一次） |
+| `POST /api/dsh-mcp-status/retry` | `{ id }`：重新挂载这一行（= 重新连接） |
+| `POST /api/dsh-mcp-status/test` | `{ id }`：真握手，返回协议版本 / serverInfo / 工具数 / 失败原因 |
 
 写操作要求同源证明，且所有路由都只接受回环来源。
 
@@ -56,10 +56,10 @@ An MCP server panel for the DeepSeek Harness Web GUI: it lists every `@deepseek-
 三种装法，任选其一：
 
 1. 本地目录（开发用）：`dsh plugin --profile <profile> add link:<本目录>`；
-2. 从 GitHub：`dsh plugin --profile <profile> add github:SonettoGu14/dsh-mcp-panel`；
+2. 从 GitHub：`dsh plugin --profile <profile> add github:SonettoGu14/dsh-mcp-status`；
 3. 在 Harness 里用插件管理器的 `install_bundle` 指向本目录或本仓库。
 
-安装后在侧边栏点「MCP 服务器」即可。卸载：`dsh plugin --profile <profile> remove dsh-mcp-panel`。
+安装后在侧边栏点「MCP 服务器」即可。卸载：`dsh plugin --profile <profile> remove dsh-mcp-status`。
 
 ## 开发
 

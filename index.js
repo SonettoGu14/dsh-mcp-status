@@ -1,5 +1,5 @@
 /**
- * dsh-mcp-panel — 宿主半体。
+ * dsh-mcp-status — 宿主半体。
  *
  * 只做三件事，其它都交给已有的组件：
  *   1. 列出**当前真正加载的** MCP 服务器：遍历 loader 里所有
@@ -14,7 +14,7 @@
  * 不动文件其余部分），随后由 DSH 的补丁监听热重载该行——重载即重新连接，这就是「切开关自动
  * 重连」。监听没生效时退回到 `hmr.reconcileProfile([id])` 主动重排。
  *
- * @module dsh-mcp-panel
+ * @module dsh-mcp-status
  */
 
 import { constants as fsConstants } from 'node:fs';
@@ -24,7 +24,7 @@ import { join } from 'node:path';
 import { probeServer } from './lib/probe.js';
 
 /** 浏览器半体与宿主共用的包名（客户端模块 id 与 locale 命名空间）。 */
-const PLUGIN_ID = 'dsh-mcp-panel';
+const PLUGIN_ID = 'dsh-mcp-status';
 /** 承载一台 MCP 服务器的那一行插件。 */
 const MCP_CLIENT_NAME = '@deepseek-ai/dsh-mcp-client';
 /** cordis FiberState：2 = 运行中，3 = 失败。 */
@@ -38,7 +38,7 @@ const FIBER_FAILED = 3;
 const SETTLE_TIMEOUT_MS = 8000;
 /** 等待超时后主动重排的轮数（每轮仍受 SETTLE_TIMEOUT_MS 约束）。 */
 const RETRY_ROUNDS = 1;
-const ROUTE_BASE = '/api/dsh-mcp-panel';
+const ROUTE_BASE = '/api/dsh-mcp-status';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -97,7 +97,7 @@ async function writeAtomic(file, content) {
   } catch {
     mode = undefined;
   }
-  const temporary = `${file}.dsh-mcp-panel.tmp`;
+  const temporary = `${file}.dsh-mcp-status.tmp`;
   await writeFile(temporary, content, mode === undefined ? undefined : { mode });
   await rename(temporary, file);
 }
@@ -496,5 +496,5 @@ export function apply(ctx) {
     return () => {
       for (const dispose of routes) dispose();
     };
-  }, 'dsh-mcp-panel: routes');
+  }, 'dsh-mcp-status: routes');
 }
