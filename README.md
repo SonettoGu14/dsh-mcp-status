@@ -102,11 +102,14 @@ per-agent 作用域、全局注册表看不见，把它当断线会误报也会�
 
 ## 安装
 
-三种装法，任选其一：
+四种装法，任选其一：
 
-1. 本地目录（开发用）：`dsh plugin --profile <profile> add link:<本目录>`；
-2. 从 GitHub：`dsh plugin --profile <profile> add github:SonettoGu14/dsh-mcp-status`；
-3. 在 Harness 里用插件管理器的 `install_bundle` 指向本目录或本仓库。
+1. **npm（推荐）**：`dsh plugin --profile <profile> add dsh-mcp-status` —— 预构建包，不需要构建授权；
+2. 本地目录（开发用）：`dsh plugin --profile <profile> add link:<本目录>`；
+3. 从 GitHub：`dsh plugin --profile <profile> add github:SonettoGu14/dsh-mcp-status`；
+4. 在 Harness 里用插件管理器的 `install_bundle` 指向本目录或本仓库。
+
+npm 包页：<https://www.npmjs.com/package/dsh-mcp-status>
 
 安装后在侧边栏点「MCP 服务器」即可。卸载：`dsh plugin --profile <profile> remove dsh-mcp-status`。
 
