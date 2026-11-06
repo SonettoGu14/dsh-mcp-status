@@ -1,6 +1,6 @@
 {
   "name": "dsh-mcp-status",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "DSH Web GUI 的 MCP 服务器面板：在侧边栏查看每个 MCP 服务器的连接状态、工具数量与配置，并可直接开关、重试连接。",
   "license": "MIT",
@@ -39,7 +39,10 @@
     "locale/*.json",
     "README.md",
     "LICENSE",
-    "icon.svg"
+    "icon.svg",
+    "lib/status.js",
+    "test/status.test.mjs",
+    "test/fixtures/echo-stdio.mjs"
   ],
   "dsh": {
     "manifestVersion": 1,
@@ -51,5 +54,8 @@
       "immediately": true,
       "inject": []
     }
+  },
+  "scripts": {
+    "test": "node test/status.test.mjs && node lib/probe.test.mjs"
   }
 }

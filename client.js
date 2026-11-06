@@ -57,6 +57,28 @@ window.__ModuleLoader__.load({
       'field.headers': '请求头',
       'field.source': '来源',
       'field.entry': '条目',
+      'field.reason': '判定',
+      'field.evidence': '依据',
+      'panel.updated': '已更新 {n}s 前',
+      'reason.disabled': '已停用（用户选择，不是故障）',
+      'reason.fiber-failed': 'MCP 客户端加载失败',
+      'reason.pending': '客户端正在启动',
+      'reason.probe-failed': '最近一次连接测试失败',
+      'reason.tcp-refused': '端口拒绝连接',
+      'reason.no-tools': '没有注册任何工具',
+      'reason.connected': '已连接',
+      'reason.unknown-tools': '工具表读不到，不下结论',
+      'evidence.fiber': 'fiber',
+      'evidence.tools': '工具',
+      'evidence.tcp': 'TCP',
+      'evidence.probe': '测试',
+      'evidence.active': '运行中',
+      'evidence.failed': '失败',
+      'evidence.pending': '启动中',
+      'evidence.ok': '通',
+      'evidence.refused': '拒绝连接',
+      'evidence.timeout': '超时',
+      'evidence.error': '错误',
       'field.reconnect': '重连策略',
       'field.timeout': '调用超时',
       'hint.notToggleable': '该服务器由插件包提供，不能在面板里开关',
@@ -107,6 +129,28 @@ window.__ModuleLoader__.load({
       'field.headers': 'Headers',
       'field.source': 'Source',
       'field.entry': 'Entry',
+      'field.reason': 'Verdict',
+      'field.evidence': 'Evidence',
+      'panel.updated': 'updated {n}s ago',
+      'reason.disabled': 'disabled by choice — not a fault',
+      'reason.fiber-failed': 'the MCP client failed to load',
+      'reason.pending': 'the MCP client is starting',
+      'reason.probe-failed': 'the last connection test failed',
+      'reason.tcp-refused': 'the port refuses connections',
+      'reason.no-tools': 'no tools registered',
+      'reason.connected': 'connected',
+      'reason.unknown-tools': 'tool registry unreadable — no verdict',
+      'evidence.fiber': 'fiber',
+      'evidence.tools': 'tools',
+      'evidence.tcp': 'TCP',
+      'evidence.probe': 'test',
+      'evidence.active': 'active',
+      'evidence.failed': 'failed',
+      'evidence.pending': 'starting',
+      'evidence.ok': 'ok',
+      'evidence.refused': 'refused',
+      'evidence.timeout': 'timeout',
+      'evidence.error': 'error',
       'field.reconnect': 'Reconnect policy',
       'field.timeout': 'Call timeout',
       'hint.notToggleable': 'Provided by a plugin package; it cannot be switched here',
@@ -298,6 +342,34 @@ window.__ModuleLoader__.load({
       ];
     }
 
+    /** 判定的一句话解释（本地化；服务端只给 reason code）。 */
+    function describeReason(t, server) {
+      const key = `reason.${server.reason ?? 'connected'}`;
+      const text = t(key);
+      return text === key ? (server.reason ?? '') : text;
+    }
+
+    /** 依据摘要：把 resolver 的 evidence 压成一行，带时间戳的项标注多久以前。 */
+    function describeEvidence(t, server) {
+      const now = Date.now();
+      const parts = [];
+      for (const item of server.evidence ?? []) {
+        const label = t(`evidence.${item.signal}`);
+        if (item.signal === 'tools') {
+          parts.push(`${label} ${item.value === null || item.value === undefined ? '?' : item.value}`);
+          continue;
+        }
+        const value = item.signal === 'fiber'
+          ? t(`evidence.${item.value}`)
+          : item.signal === 'tcp'
+            ? t(`evidence.${item.value}`)
+            : item.value === 'ok' ? t('evidence.ok') : (item.detail ?? t('evidence.failed'));
+        const age = typeof item.at === 'number' ? ` (${Math.max(0, Math.round((now - item.at) / 1000))}s)` : '';
+        parts.push(`${label} ${value}${age}`);
+      }
+      return parts.join(' · ');
+    }
+
     function ServerCard({ server, t, busy, onToggle, onTest, onRetry, expanded, onExpand }) {
       const state = server.state;
       const toggleable = server.writableFile === true;
@@ -339,6 +411,9 @@ window.__ModuleLoader__.load({
       }
       if (server.toolCallTimeoutMs) fields.push([t('field.timeout'), formatDuration(server.toolCallTimeoutMs)]);
       if (server.source) fields.push([t('field.source'), `${server.source}${server.patchFile ? ` · ${server.patchFile}` : ''}`]);
+      fields.push([t('field.reason'), describeReason(t, server)]);
+      const evidence = describeEvidence(t, server);
+      if (evidence !== '') fields.push([t('field.evidence'), evidence]);
       fields.push([t('field.entry'), server.id]);
       const detail = fields.map(([label, value], index) => detailCell(label, value, index));
 
@@ -581,7 +656,13 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'mcpPanel-headMain' },
           h('div', { className: 'mcpPanel-title' }, t('panel.title')),
-          h('div', { className: 'mcpPanel-sub' }, snapshot.loading ? '…' : `${snapshot.servers.length} MCP`),
+          h('div', { className: 'mcpPanel-sub' }, snapshot.loading
+            ? '…'
+            : `${snapshot.servers.length} MCP · ${t('panel.updated', {
+              n: snapshot.checkedAt === undefined
+                ? 0
+                : Math.max(0, Math.round((Date.now() - snapshot.checkedAt) / 1000)),
+            })}`),
         ),
         h(
           'div',

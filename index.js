@@ -1,18 +1,19 @@
 /**
  * dsh-mcp-status — 宿主半体。
  *
- * 只做三件事，其它都交给已有的组件：
- *   1. 列出**当前真正加载的** MCP 服务器：遍历 loader 里所有
- *      `@deepseek-ai/dsh-mcp-client` 行（无论它来自 profile 补丁、home 补丁还是某个
- *      插件包插入的），所以「有哪些 server」的答案与宿主实际运行的东西一致。
- *   2. 读存活状态：loader fiber 的 state 决定「已停用 / 加载失败 / 连接中 / 已注册」，
- *      工具注册表里 `mcp__<server>__*` 的条数决定「真的连上了没有」——mcp-client 在连不上时
- *      不会抛错（`failOnStartupError` 默认 false），fiber 照样 active，只有工具面是空的。
- *   3. 提供三条同源 HTTP 路由给浏览器半体：读快照、开关、连接测试。
+ * 四件事：
+ *   1. 列出**当前真正加载的** MCP 服务器：遍历 loader 里所有 `@deepseek-ai/dsh-mcp-client`
+ *      行（profile 补丁、home 补丁、插件包插入的行都算），所以「有哪些 server」的答案与宿主
+ *      实际运行的东西一致。
+ *   2. 推导存活状态并留下依据：loader fiber 的 state、工具注册表里 `mcp__<server>__*` 的条数、
+ *      streamable-http 行的 TCP 探活、最近一次「测试连接」的结论。判定逻辑在 `lib/status.js`
+ *      （纯函数、可单测），这里只负责采集与缓存。
+ *   3. 把同一份状态喂给三个消费方：面板（HTTP 路由）、模型（system prompt 摘要）、
+ *      工具调用闸门（不可用服务器的工具在派发前被拒）。
+ *   4. 提供开关与连接测试：开关只改补丁文件里那一行的 `disabled`，热重载即重连。
  *
- * 开关的持久化方式与 @hyzyn/dsh-mcp 一致：只改补丁文件里那一行的 `disabled`（行级文本编辑，
- * 不动文件其余部分），随后由 DSH 的补丁监听热重载该行——重载即重新连接，这就是「切开关自动
- * 重连」。监听没生效时退回到 `hmr.reconcileProfile([id])` 主动重排。
+ * 设计参考 opencode 的 MCP 状态所有权（一份状态服务多个消费方）；差别是 DSH 的
+ * `dsh-mcp-client` 不暴露连接状态，所以我们的状态是推导的，每条结论都必须带 evidence。
  *
  * @module dsh-mcp-status
  */
@@ -22,30 +23,31 @@ import { access, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import {
+  buildHealthText,
+  decideGuard,
+  FIBER_ACTIVE,
+  FIBER_FAILED,
+  normalizeConfig,
+  resolveStatus,
+  sectionOrder,
+  serverNameFromTool,
+} from './lib/status.js';
 import { probeServer } from './lib/probe.js';
 
 /** 浏览器半体与宿主共用的包名（客户端模块 id 与 locale 命名空间）。 */
 const PLUGIN_ID = 'dsh-mcp-status';
 /** 承载一台 MCP 服务器的那一行插件。 */
 const MCP_CLIENT_NAME = '@deepseek-ai/dsh-mcp-client';
-/** cordis FiberState：2 = 运行中，3 = 失败。 */
-const FIBER_ACTIVE = 2;
-const FIBER_FAILED = 3;
-/**
- * 开关后的等待上限（毫秒）。只等「热重载 + 一次连接」：mcp-client 自己还有
- * `reconnect` 策略在后台退避重连，面板不必替它把 10 次重试都等完——等超时就把
- * 「还在连接中」交回给界面，下一次轮询会自然刷新。
- */
-const SETTLE_TIMEOUT_MS = 8000;
-/** 等待超时后主动重排的轮数（每轮仍受 SETTLE_TIMEOUT_MS 约束）。 */
+/** 等待超时后主动重排的轮数（每轮仍受 startupWaitMs 约束）。 */
 const RETRY_ROUNDS = 1;
 const ROUTE_BASE = '/api/dsh-mcp-status';
 /** TCP 探活的缓存时长：轮询 4 s 一次，2 s 内复用同一个结果，避免 300 ms 档的等待期把它打成风暴。 */
 const REACHABILITY_TTL_MS = 2000;
 /** 「测试连接」结果的保质期：过期后回落到工具注册表推断，免得一次旧失败永久污名化一行。 */
 const PROBE_TTL_MS = 10 * 60 * 1000;
-/** 测试失败后，徽标跟着这条错误走的窗口：端口通着时也以它为优先（用户刚点过，界面必须一致）。 */
-const PROBE_ASSERT_MS = 60 * 1000;
+/** system prompt 摘要的 section 名。 */
+const HEALTH_SECTION = 'mcp-status:health';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -133,7 +135,7 @@ async function setRowDisabled(file, id, disabled) {
 }
 
 /* ------------------------------------------------------------------ *
- * 快照：行 + 存活状态 + 工具数
+ * 采集：行 + 工具数 + 端口探活 + 测试结论
  * ------------------------------------------------------------------ */
 
 function configOf(entry) {
@@ -189,33 +191,6 @@ function toolCounts(ctx, serverNames) {
   return counts;
 }
 
-/**
- * 存活判据（顺序即优先级）：
- *   1. 行被停用 → disabled（不连接、不占工具表）
- *   2. loader fiber 失败 → failed
- *   3. fiber 还没起来 → connecting
- *   4. 最近一次「测试连接」失败 → unreachable（用户刚点过，界面必须与那条错误一致）
- *   5. streamable-http 的端口连不上 → unreachable
- *   6. 工具注册表里有 `mcp__<server>__*` → connected
- *   7. 没有工具 → idle（客户端加载了但没连上）
- *
- * 为什么第 5 条必须存在：`toolCount > 0` 只证明「这个进程曾经连接成功并注册过工具」。
- * 服务器后来死掉时 mcp-client 不会注销这些工具，于是 fiber 仍 active、工具仍在注册表里——
- * 只按工具数判就会出现「端口已经 ECONNREFUSED，面板还是绿的」（实测踩过：unityMCP 49 个残留工具）。
- * stdio 没有可连的端口，只能靠用户点「测试连接」留下的第 4 条判据。
- */
-function stateOf(entry, count, { reachable, probe } = {}) {
-  if (entry.disabled) return 'disabled';
-  const state = entry.fiber?.state;
-  if (state === FIBER_FAILED) return 'failed';
-  if (state !== FIBER_ACTIVE) return 'connecting';
-  if (probe !== undefined && probe.ok === false) return 'unreachable';
-  if (reachable === false) return 'unreachable';
-  if (probe !== undefined && probe.ok === true) return 'connected';
-  if (count === undefined) return 'connected';
-  return count > 0 ? 'connected' : 'idle';
-}
-
 /* ------------------------------------------------------------------ *
  * 存活旁证：HTTP 端口探活 + 「测试连接」结果
  * ------------------------------------------------------------------ */
@@ -223,25 +198,28 @@ function stateOf(entry, count, { reachable, probe } = {}) {
 /** {@link reachableOf} 的结果缓存，key 是 `host:port`。 */
 const reachCache = new Map();
 
-/** TCP 连一下 host:port：连上即可达，refused/timeout 即不可达。 */
+/** TCP 连一下 host:port：连上即可达；拒绝/超时/错误返回原因，供 guard 与 prompt 引用。 */
 function tcpReachable(host, port, timeoutMs = 700) {
   return new Promise((resolve) => {
     const socket = net.connect({ host, port });
     let settled = false;
-    const finish = (ok) => {
+    const finish = (ok, detail) => {
       if (settled) return;
       settled = true;
       socket.destroy();
-      resolve(ok);
+      resolve({ ok, detail });
     };
     socket.setTimeout(timeoutMs);
-    socket.once('connect', () => finish(true));
-    socket.once('timeout', () => finish(false));
-    socket.once('error', () => finish(false));
+    socket.once('connect', () => finish(true, 'ok'));
+    socket.once('timeout', () => finish(false, 'timeout'));
+    socket.once('error', (error) => finish(false, error?.code === 'ECONNREFUSED' ? 'refused' : 'error'));
   });
 }
 
-/** 只对 streamable-http 有意义：解析 url 取 host/port 再探活；url 不合法返回 null（不下结论）。 */
+/**
+ * 只对 streamable-http 有意义：解析 url 取 host/port 再探活。
+ * @returns {{ok: boolean, detail: string, at: number}|null} url 不合法时返回 null（不下结论）
+ */
 async function reachableOf(url) {
   let parsed;
   try {
@@ -257,9 +235,10 @@ async function reachableOf(url) {
   const key = `${host}:${port}`;
   const now = Date.now();
   const cached = reachCache.get(key);
-  if (cached !== undefined && now - cached.at < REACHABILITY_TTL_MS) return cached.value;
-  const value = await tcpReachable(host, port);
-  reachCache.set(key, { value, at: Date.now() });
+  if (cached !== undefined && now - cached.at < REACHABILITY_TTL_MS) return cached;
+  const { ok, detail } = await tcpReachable(host, port);
+  const value = { ok, detail, at: Date.now() };
+  reachCache.set(key, value);
   return value;
 }
 
@@ -277,31 +256,12 @@ function storedProbe(id) {
 }
 
 /**
- * 决定「这次的测试结论还作数吗」。
+ * 采一份完整快照。
  *
- * - 测试成功 → 直接算数（连接是可直接验证的正面证据）。
- * - 测试失败 + 端口也不通 → 算数（两条证据一致）。
- * - 测试失败 + 端口通着 → 只在刚测完 {@link PROBE_ASSERT_MS} 内算数：用户刚点过，
- *   徽标必须与那条错误一致；过了这个窗口就让每次轮询的 TCP 结果说话，否则服务器恢复后
- *   徽标会一直红着等用户再点一次。
- * - stdio 没有端口证据（reach 为 null），失败结论按 {@link PROBE_TTL_MS} 保留。
+ * 状态由 {@link resolveStatus} 判定；DTO 里把 `pending` 映射回界面既有的 `connecting`
+ * 取值（面板不需要为一个内部状态名改 CSS），并附带 reason + evidence 让界面能解释结论。
  */
-function probeVerdict(probe, reach) {
-  if (probe === undefined) return undefined;
-  if (probe.ok === true) return probe;
-  if (reach === false) return probe;
-  if (reach === true && Date.now() - probe.at < PROBE_ASSERT_MS) return probe;
-  return undefined;
-}
-
-function errorOf(entry) {
-  if (entry.fiber?.state !== FIBER_FAILED) return undefined;
-  const error = entry.fiber?.error;
-  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
-  return message === '' ? 'MCP 客户端加载失败' : message;
-}
-
-async function collect(ctx, { withSources = true } = {}) {
+async function collect(ctx, settings, { withSources = true } = {}) {
   const loader = ctx.get('loader');
   const rows = loader === undefined || typeof loader.entries !== 'function'
     ? []
@@ -312,6 +272,7 @@ async function collect(ctx, { withSources = true } = {}) {
     .map((config) => (typeof config.serverName === 'string' ? config.serverName : ''))
     .filter((name) => name !== '');
   const counts = toolCounts(ctx, serverNames);
+  const now = Date.now();
 
   // 只有 streamable-http 能便宜地探活（TCP）；stdio 的存活只能靠工具注册表 + 用户点测试。
   const reachable = await Promise.all(configs.map((config) => (
@@ -334,8 +295,19 @@ async function collect(ctx, { withSources = true } = {}) {
     const serverName = typeof config.serverName === 'string' ? config.serverName : '(未命名)';
     const count = counts?.get(serverName);
     const summary = summarize(config);
-    const reach = reachable[index] ?? null;
-    const probe = probeVerdict(storedProbe(entry.options.id), reach);
+    const reach = reachable[index];
+    const probe = storedProbe(entry.options.id);
+    const status = resolveStatus({
+      disabled: Boolean(entry.disabled),
+      fiberState: entry.fiber?.state ?? null,
+      toolCount: count === undefined ? null : count,
+      reachable: reach === null ? null : reach.ok,
+      reachableAt: reach === null ? null : reach.at,
+      reachDetail: reach === null ? null : reach.detail,
+      probe,
+      now,
+      probeAssertMs: settings.probeAssertMs,
+    });
     let patchFile;
     let layer;
     for (const [path, text] of sourceText) {
@@ -349,11 +321,15 @@ async function collect(ctx, { withSources = true } = {}) {
       id: entry.options.id,
       entryPath: entry.id,
       serverName,
-      state: stateOf(entry, count, { reachable: reach, probe }),
+      state: status.state === 'pending' ? 'connecting' : status.state,
+      reason: status.reason,
+      evidence: status.evidence,
       disabled: Boolean(entry.disabled),
       fiberState: entry.fiber?.state ?? null,
       toolCount: count === undefined ? null : count,
-      reachable: reach,
+      reachable: reach === null ? null : reach.ok,
+      reachDetail: reach === null ? null : reach.detail,
+      checkedAt: now,
       probe: probe === undefined
         ? null
         : {
@@ -379,15 +355,67 @@ async function collect(ctx, { withSources = true } = {}) {
   return {
     servers,
     patchFiles: candidatePatchFiles(ctx).map((file) => ({ path: file.path, layer: file.layer })),
-    checkedAt: Date.now(),
+    checkedAt: now,
   };
 }
 
-async function waitForState(ctx, id, accept, timeoutMs) {
+function errorOf(entry) {
+  if (entry.fiber?.state !== FIBER_FAILED) return undefined;
+  const error = entry.fiber?.error;
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  return message === '' ? 'MCP 客户端加载失败' : message;
+}
+
+/**
+ * 状态缓存：后台按 refreshMs 刷新，给 system prompt 与 guard 用；
+ * 面板请求 `refresh(true)` 时当场重采，保持它原有的新鲜度。
+ */
+function createTracker(ctx, config) {
+  let cache = { servers: [], patchFiles: [], checkedAt: 0 };
+  let inflight;
+  const listeners = new Set();
+
+  async function refresh(force = false) {
+    if (!force && Date.now() - cache.checkedAt < config.refreshMs) return cache;
+    if (inflight !== undefined) return inflight;
+    inflight = collect(ctx, config)
+      .then((next) => {
+        cache = next;
+        for (const listener of listeners) {
+          try {
+            listener(cache);
+          } catch {
+            /* 通知失败不影响刷新 */
+          }
+        }
+        return cache;
+      })
+      .catch(() => cache)
+      .finally(() => {
+        inflight = undefined;
+      });
+    return inflight;
+  }
+
+  return {
+    refresh,
+    peek: () => cache,
+    onChange(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * 动作
+ * ------------------------------------------------------------------ */
+
+async function waitForState(ctx, config, tracker, id, accept, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let last;
   while (Date.now() <= deadline) {
-    const snapshot = await collect(ctx, { withSources: false });
+    const snapshot = await tracker.refresh(true);
     last = snapshot.servers.find((server) => server.id === id);
     if (last !== undefined && accept(last)) return last;
     await sleep(300);
@@ -405,17 +433,13 @@ async function forceReload(ctx, id) {
     else await run();
     return true;
   } catch (error) {
-    ctx.logger?.warn?.(`[mcp-panel] ${id}: 重新挂载失败 — ${error?.message ?? error}`);
+    ctx.logger?.warn?.(`[mcp-status] ${id}: 重新挂载失败 — ${error?.message ?? error}`);
     return false;
   }
 }
 
-/* ------------------------------------------------------------------ *
- * 动作
- * ------------------------------------------------------------------ */
-
-async function setEnabled(ctx, id, enabled) {
-  const before = await collect(ctx);
+async function setEnabled(ctx, config, tracker, id, enabled) {
+  const before = await tracker.refresh(true);
   const row = before.servers.find((server) => server.id === id);
   if (row === undefined) throw new Error(`未找到 MCP 服务器条目：${id}`);
   if (row.patchFile === null) throw new Error('这一行由插件包提供，不在可编辑的补丁文件里');
@@ -434,12 +458,12 @@ async function setEnabled(ctx, id, enabled) {
     : (server) => server.state === 'disabled';
 
   let attempts = 0;
-  let current = await waitForState(ctx, id, accept, SETTLE_TIMEOUT_MS);
+  let current = await waitForState(ctx, config, tracker, id, accept, config.startupWaitMs);
   while (current !== undefined && !accept(current) && enabled && attempts < RETRY_ROUNDS) {
     attempts += 1;
     const reloaded = await forceReload(ctx, id);
     if (!reloaded) break;
-    current = await waitForState(ctx, id, accept, SETTLE_TIMEOUT_MS);
+    current = await waitForState(ctx, config, tracker, id, accept, config.startupWaitMs);
   }
   return {
     state: current?.state ?? 'unknown',
@@ -449,19 +473,19 @@ async function setEnabled(ctx, id, enabled) {
   };
 }
 
-async function reconnect(ctx, id) {
-  const before = await collect(ctx);
+async function reconnect(ctx, config, tracker, id) {
+  const before = await tracker.refresh(true);
   const row = before.servers.find((server) => server.id === id);
   if (row === undefined) throw new Error(`未找到 MCP 服务器条目：${id}`);
   probeResults.delete(id);
   reachCache.clear();
   let attempts = 1;
   await forceReload(ctx, id);
-  let current = await waitForState(ctx, id, (server) => server.state === 'connected', SETTLE_TIMEOUT_MS);
+  let current = await waitForState(ctx, config, tracker, id, (server) => server.state === 'connected', config.startupWaitMs);
   while (current !== undefined && current.state !== 'connected' && attempts <= RETRY_ROUNDS) {
     attempts += 1;
     await forceReload(ctx, id);
-    current = await waitForState(ctx, id, (server) => server.state === 'connected', SETTLE_TIMEOUT_MS);
+    current = await waitForState(ctx, config, tracker, id, (server) => server.state === 'connected', config.startupWaitMs);
   }
   return {
     state: current?.state ?? 'unknown',
@@ -472,28 +496,93 @@ async function reconnect(ctx, id) {
 }
 
 /** 用与宿主真正连接同一份配置做一次 JSON-RPC 握手，拿回可读的失败原因。 */
-async function testServer(ctx, id) {
-  const snapshot = await collect(ctx);
-  const row = snapshot.servers.find((server) => server.id === id);
+async function testServer(ctx, config, id) {
+  const before = await collect(ctx, config);
+  const row = before.servers.find((server) => server.id === id);
   if (row === undefined) throw new Error(`未找到 MCP 服务器条目：${id}`);
   const loader = ctx.get('loader');
   const entry = [...loader.entries()].find((item) => item?.options?.id === id);
-  const config = entry === undefined ? {} : configOf(entry);
-  const probeConfig = { transport: config.transport, serverName: row.serverName };
-  if (config.transport === 'stdio') {
-    probeConfig.command = config.command;
-    probeConfig.args = Array.isArray(config.args) ? config.args.filter((arg) => typeof arg === 'string') : [];
+  const serverConfig = entry === undefined ? {} : configOf(entry);
+  const probeConfig = { transport: serverConfig.transport, serverName: row.serverName };
+  if (serverConfig.transport === 'stdio') {
+    probeConfig.command = serverConfig.command;
+    probeConfig.args = Array.isArray(serverConfig.args)
+      ? serverConfig.args.filter((arg) => typeof arg === 'string')
+      : [];
     probeConfig.env = Object.fromEntries(
-      Object.entries(config.env ?? {}).filter(([, value]) => typeof value === 'string'),
+      Object.entries(serverConfig.env ?? {}).filter(([, value]) => typeof value === 'string'),
     );
-    if (typeof config.cwd === 'string' && config.cwd !== '') probeConfig.cwd = config.cwd;
+    if (typeof serverConfig.cwd === 'string' && serverConfig.cwd !== '') probeConfig.cwd = serverConfig.cwd;
   } else {
-    probeConfig.url = config.url;
+    probeConfig.url = serverConfig.url;
     probeConfig.headers = Object.fromEntries(
-      Object.entries(config.headers ?? {}).filter(([, value]) => typeof value === 'string'),
+      Object.entries(serverConfig.headers ?? {}).filter(([, value]) => typeof value === 'string'),
     );
   }
-  return probeServer(probeConfig, { timeoutMs: 15000 });
+  return probeServer(probeConfig, { timeoutMs: config.probeTimeoutMs });
+}
+
+/* ------------------------------------------------------------------ *
+ * 模型可见性：不可用摘要（system prompt）+ 调用闸门（tools.guard）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 只在「有不可用服务器」时注册 section，恢复后注销。
+ * 这样健康时 prompt 里连一个空行都不会多——空 section 会不会产生空行属于未验证行为，
+ * 动态注册让这个不确定性消失。
+ */
+function attachHealthSection(ctx, config, tracker) {
+  if (!config.promptHealth) return;
+  ctx.inject(['systemPrompt'], (inner) => {
+    let dispose;
+    const sync = () => {
+      const text = buildHealthText(tracker.peek(), { now: Date.now() });
+      if (text !== '' && dispose === undefined) {
+        dispose = inner.systemPrompt.section({
+          name: HEALTH_SECTION,
+          order: sectionOrder(inner.systemPrompt),
+          interpolate: false,
+          text: () => buildHealthText(tracker.peek(), { now: Date.now() }),
+        });
+      } else if (text === '' && dispose !== undefined) {
+        dispose();
+        dispose = undefined;
+      }
+    };
+    inner.effect(() => {
+      sync();
+      const stop = tracker.onChange(sync);
+      return () => {
+        stop();
+        if (dispose !== undefined) dispose();
+        dispose = undefined;
+      };
+    }, 'dsh-mcp-status: health section');
+  });
+}
+
+/**
+ * 调用闸门：不可用服务器的 `mcp__<server>__*` 调用在派发前被拒，理由可读。
+ * guard 是同步的，所以只读缓存快照，绝不在这里探活。
+ */
+function attachGuard(ctx, config, tracker) {
+  if (!config.guardUnreachable) return;
+  ctx.inject(['tools'], (inner) => {
+    inner.effect(() => inner.tools.guard((execution) => {
+      const serverName = serverNameFromTool(execution?.name);
+      if (serverName === undefined) return undefined;
+      const snapshot = tracker.peek();
+      const row = snapshot.servers.find((server) => server.serverName === serverName);
+      if (row === undefined) return undefined;
+      return decideGuard({
+        toolName: execution.name,
+        row,
+        snapshotAt: snapshot.checkedAt,
+        now: Date.now(),
+        config,
+      });
+    }), 'dsh-mcp-status: unreachable guard');
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -551,10 +640,27 @@ export const name = PLUGIN_ID;
 export const inject = ['webServer'];
 
 /**
- * 注册三条路由。整块都在一个 effect 里，插件卸载时路由一起消失。
+ * 注册路由、后台刷新、prompt 摘要与调用闸门。
  * @param ctx - 插件上下文（webServer 已就绪）。
+ * @param rawConfig - 行配置（patch 里 `config:` 下的对象）；未声明 Config schema，这里手工归一化。
  */
-export function apply(ctx) {
+export function apply(ctx, rawConfig) {
+  const config = normalizeConfig(rawConfig);
+  const tracker = createTracker(ctx, config);
+  // 冷启动先采一次，别让 prompt/guard 在第一个 refreshMs 窗口里读到空快照。
+  tracker.refresh(true);
+
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      tracker.refresh();
+    }, config.refreshMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    return () => clearInterval(timer);
+  }, 'dsh-mcp-status: refresh loop');
+
+  attachHealthSection(ctx, config, tracker);
+  attachGuard(ctx, config, tracker);
+
   ctx.effect(() => {
     const routes = [
       ctx.webServer.register({
@@ -564,7 +670,9 @@ export function apply(ctx) {
           const rejection = gate(request, { method: 'GET', write: false });
           if (rejection !== undefined) return sendJson(response, rejection.status, { ok: false, error: rejection.error });
           try {
-            return sendJson(response, 200, { ok: true, ...(await collect(ctx)) });
+            // 面板每次拉取都当场重采：探活有 2 s 缓存、其它全是内存读取，成本可忽略。
+            const snapshot = await tracker.refresh(true);
+            return sendJson(response, 200, { ok: true, ...snapshot });
           } catch (error) {
             return sendJson(response, 500, { ok: false, error: error?.message ?? String(error) });
           }
@@ -579,7 +687,7 @@ export function apply(ctx) {
           try {
             const body = await readJsonBody(request);
             if (typeof body.id !== 'string' || body.id === '') throw new Error('缺少 id');
-            const result = await setEnabled(ctx, body.id, Boolean(body.enabled));
+            const result = await setEnabled(ctx, config, tracker, body.id, Boolean(body.enabled));
             return sendJson(response, 200, { ok: true, ...result });
           } catch (error) {
             return sendJson(response, 400, { ok: false, error: error?.message ?? String(error) });
@@ -595,7 +703,7 @@ export function apply(ctx) {
           try {
             const body = await readJsonBody(request);
             if (typeof body.id !== 'string' || body.id === '') throw new Error('缺少 id');
-            const result = await reconnect(ctx, body.id);
+            const result = await reconnect(ctx, config, tracker, body.id);
             return sendJson(response, 200, { ok: true, ...result });
           } catch (error) {
             return sendJson(response, 400, { ok: false, error: error?.message ?? String(error) });
@@ -611,7 +719,7 @@ export function apply(ctx) {
           try {
             const body = await readJsonBody(request);
             if (typeof body.id !== 'string' || body.id === '') throw new Error('缺少 id');
-            const result = await testServer(ctx, body.id);
+            const result = await testServer(ctx, config, body.id);
             // 结果既返回给这次调用，也记下来让下一次快照（以及轮询）把徽标改成同一条结论。
             probeResults.set(body.id, {
               ok: result.ok === true,
