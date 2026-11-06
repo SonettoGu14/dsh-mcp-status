@@ -19,6 +19,7 @@
 
 import { constants as fsConstants } from 'node:fs';
 import { access, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import net from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { probeServer } from './lib/probe.js';
@@ -39,6 +40,12 @@ const SETTLE_TIMEOUT_MS = 8000;
 /** 等待超时后主动重排的轮数（每轮仍受 SETTLE_TIMEOUT_MS 约束）。 */
 const RETRY_ROUNDS = 1;
 const ROUTE_BASE = '/api/dsh-mcp-status';
+/** TCP 探活的缓存时长：轮询 4 s 一次，2 s 内复用同一个结果，避免 300 ms 档的等待期把它打成风暴。 */
+const REACHABILITY_TTL_MS = 2000;
+/** 「测试连接」结果的保质期：过期后回落到工具注册表推断，免得一次旧失败永久污名化一行。 */
+const PROBE_TTL_MS = 10 * 60 * 1000;
+/** 测试失败后，徽标跟着这条错误走的窗口：端口通着时也以它为优先（用户刚点过，界面必须一致）。 */
+const PROBE_ASSERT_MS = 60 * 1000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -182,13 +189,109 @@ function toolCounts(ctx, serverNames) {
   return counts;
 }
 
-function stateOf(entry, count) {
+/**
+ * 存活判据（顺序即优先级）：
+ *   1. 行被停用 → disabled（不连接、不占工具表）
+ *   2. loader fiber 失败 → failed
+ *   3. fiber 还没起来 → connecting
+ *   4. 最近一次「测试连接」失败 → unreachable（用户刚点过，界面必须与那条错误一致）
+ *   5. streamable-http 的端口连不上 → unreachable
+ *   6. 工具注册表里有 `mcp__<server>__*` → connected
+ *   7. 没有工具 → idle（客户端加载了但没连上）
+ *
+ * 为什么第 5 条必须存在：`toolCount > 0` 只证明「这个进程曾经连接成功并注册过工具」。
+ * 服务器后来死掉时 mcp-client 不会注销这些工具，于是 fiber 仍 active、工具仍在注册表里——
+ * 只按工具数判就会出现「端口已经 ECONNREFUSED，面板还是绿的」（实测踩过：unityMCP 49 个残留工具）。
+ * stdio 没有可连的端口，只能靠用户点「测试连接」留下的第 4 条判据。
+ */
+function stateOf(entry, count, { reachable, probe } = {}) {
   if (entry.disabled) return 'disabled';
   const state = entry.fiber?.state;
   if (state === FIBER_FAILED) return 'failed';
   if (state !== FIBER_ACTIVE) return 'connecting';
+  if (probe !== undefined && probe.ok === false) return 'unreachable';
+  if (reachable === false) return 'unreachable';
+  if (probe !== undefined && probe.ok === true) return 'connected';
   if (count === undefined) return 'connected';
   return count > 0 ? 'connected' : 'idle';
+}
+
+/* ------------------------------------------------------------------ *
+ * 存活旁证：HTTP 端口探活 + 「测试连接」结果
+ * ------------------------------------------------------------------ */
+
+/** {@link reachableOf} 的结果缓存，key 是 `host:port`。 */
+const reachCache = new Map();
+
+/** TCP 连一下 host:port：连上即可达，refused/timeout 即不可达。 */
+function tcpReachable(host, port, timeoutMs = 700) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+/** 只对 streamable-http 有意义：解析 url 取 host/port 再探活；url 不合法返回 null（不下结论）。 */
+async function reachableOf(url) {
+  let parsed;
+  try {
+    parsed = new URL(String(url));
+  } catch {
+    return null;
+  }
+  const host = parsed.hostname.startsWith('[') ? parsed.hostname.slice(1, -1) : parsed.hostname;
+  const port = parsed.port === ''
+    ? (parsed.protocol === 'https:' ? 443 : 80)
+    : Number(parsed.port);
+  if (host === '' || !Number.isFinite(port) || port <= 0) return null;
+  const key = `${host}:${port}`;
+  const now = Date.now();
+  const cached = reachCache.get(key);
+  if (cached !== undefined && now - cached.at < REACHABILITY_TTL_MS) return cached.value;
+  const value = await tcpReachable(host, port);
+  reachCache.set(key, { value, at: Date.now() });
+  return value;
+}
+
+/** 每个行的「测试连接」结果，/test 写入，toggle/retry 清掉。 */
+const probeResults = new Map();
+
+function storedProbe(id) {
+  const hit = probeResults.get(id);
+  if (hit === undefined) return undefined;
+  if (Date.now() - hit.at > PROBE_TTL_MS) {
+    probeResults.delete(id);
+    return undefined;
+  }
+  return hit;
+}
+
+/**
+ * 决定「这次的测试结论还作数吗」。
+ *
+ * - 测试成功 → 直接算数（连接是可直接验证的正面证据）。
+ * - 测试失败 + 端口也不通 → 算数（两条证据一致）。
+ * - 测试失败 + 端口通着 → 只在刚测完 {@link PROBE_ASSERT_MS} 内算数：用户刚点过，
+ *   徽标必须与那条错误一致；过了这个窗口就让每次轮询的 TCP 结果说话，否则服务器恢复后
+ *   徽标会一直红着等用户再点一次。
+ * - stdio 没有端口证据（reach 为 null），失败结论按 {@link PROBE_TTL_MS} 保留。
+ */
+function probeVerdict(probe, reach) {
+  if (probe === undefined) return undefined;
+  if (probe.ok === true) return probe;
+  if (reach === false) return probe;
+  if (reach === true && Date.now() - probe.at < PROBE_ASSERT_MS) return probe;
+  return undefined;
 }
 
 function errorOf(entry) {
@@ -210,6 +313,11 @@ async function collect(ctx, { withSources = true } = {}) {
     .filter((name) => name !== '');
   const counts = toolCounts(ctx, serverNames);
 
+  // 只有 streamable-http 能便宜地探活（TCP）；stdio 的存活只能靠工具注册表 + 用户点测试。
+  const reachable = await Promise.all(configs.map((config) => (
+    config.transport === 'streamable-http' ? reachableOf(config.url) : Promise.resolve(null)
+  )));
+
   const sourceText = new Map();
   if (withSources) {
     for (const file of candidatePatchFiles(ctx)) {
@@ -226,6 +334,8 @@ async function collect(ctx, { withSources = true } = {}) {
     const serverName = typeof config.serverName === 'string' ? config.serverName : '(未命名)';
     const count = counts?.get(serverName);
     const summary = summarize(config);
+    const reach = reachable[index] ?? null;
+    const probe = probeVerdict(storedProbe(entry.options.id), reach);
     let patchFile;
     let layer;
     for (const [path, text] of sourceText) {
@@ -239,10 +349,20 @@ async function collect(ctx, { withSources = true } = {}) {
       id: entry.options.id,
       entryPath: entry.id,
       serverName,
-      state: stateOf(entry, count),
+      state: stateOf(entry, count, { reachable: reach, probe }),
       disabled: Boolean(entry.disabled),
       fiberState: entry.fiber?.state ?? null,
       toolCount: count === undefined ? null : count,
+      reachable: reach,
+      probe: probe === undefined
+        ? null
+        : {
+          ok: probe.ok,
+          at: probe.at,
+          durationMs: probe.durationMs ?? null,
+          toolsCount: probe.toolsCount ?? null,
+          error: probe.error ?? null,
+        },
       error: errorOf(entry),
       transport: summary.transport,
       target: summary.target,
@@ -305,6 +425,9 @@ async function setEnabled(ctx, id, enabled) {
   });
   const written = await setRowDisabled(row.patchFile, id, !enabled);
   if (!written) throw new Error('补丁文件里找不到这一行（可能刚被其它工具改写，请刷新后重试）');
+  // 重新挂载就是一次新连接：旧的测试结论不再适用。
+  probeResults.delete(id);
+  reachCache.clear();
 
   const accept = enabled
     ? (server) => server.state === 'connected'
@@ -330,6 +453,8 @@ async function reconnect(ctx, id) {
   const before = await collect(ctx);
   const row = before.servers.find((server) => server.id === id);
   if (row === undefined) throw new Error(`未找到 MCP 服务器条目：${id}`);
+  probeResults.delete(id);
+  reachCache.clear();
   let attempts = 1;
   await forceReload(ctx, id);
   let current = await waitForState(ctx, id, (server) => server.state === 'connected', SETTLE_TIMEOUT_MS);
@@ -486,7 +611,16 @@ export function apply(ctx) {
           try {
             const body = await readJsonBody(request);
             if (typeof body.id !== 'string' || body.id === '') throw new Error('缺少 id');
-            return sendJson(response, 200, { ok: true, result: await testServer(ctx, body.id) });
+            const result = await testServer(ctx, body.id);
+            // 结果既返回给这次调用，也记下来让下一次快照（以及轮询）把徽标改成同一条结论。
+            probeResults.set(body.id, {
+              ok: result.ok === true,
+              at: Date.now(),
+              durationMs: result.durationMs,
+              toolsCount: result.toolsCount,
+              error: result.error,
+            });
+            return sendJson(response, 200, { ok: true, result });
           } catch (error) {
             return sendJson(response, 400, { ok: false, error: error?.message ?? String(error) });
           }

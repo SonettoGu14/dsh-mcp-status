@@ -34,6 +34,7 @@ window.__ModuleLoader__.load({
       'state.connected': '已连接',
       'state.connecting': '连接中',
       'state.idle': '未连接',
+      'state.unreachable': '未连接（不可达）',
       'state.failed': '加载失败',
       'state.disabled': '已停用',
       'state.unknown': '未知',
@@ -60,6 +61,8 @@ window.__ModuleLoader__.load({
       'field.timeout': '调用超时',
       'hint.notToggleable': '该服务器由插件包提供，不能在面板里开关',
       'hint.idle': 'MCP 客户端已加载，但没有注册任何工具——通常意味着连接失败。点「测试连接」看原因。',
+      'hint.unreachable': '最近一次连接检测失败：下面的错误就是原因。修好后点「重试」重新挂载这一行。',
+      'hint.staleTools': '工具仍然注册着（{n} 个），那是上一次连接成功留下的，不代表现在连着——连接已失效。',
       'hint.failed': '这一行加载失败，展开可看错误信息；「重试」会重新挂载它。',
       'hint.disabled': '已停用：不会连接，也不占工具表。',
       'hint.pending': 'MCP 客户端正在启动，稍等片刻会自动刷新。',
@@ -81,6 +84,7 @@ window.__ModuleLoader__.load({
       'state.connected': 'Connected',
       'state.connecting': 'Connecting',
       'state.idle': 'Not connected',
+      'state.unreachable': 'Unreachable',
       'state.failed': 'Failed',
       'state.disabled': 'Disabled',
       'state.unknown': 'Unknown',
@@ -107,6 +111,8 @@ window.__ModuleLoader__.load({
       'field.timeout': 'Call timeout',
       'hint.notToggleable': 'Provided by a plugin package; it cannot be switched here',
       'hint.idle': 'The MCP client is loaded but registered no tools — usually a failed connection. Test it to see why.',
+      'hint.unreachable': 'The latest connection check failed; the error below says why. Fix it, then use Reconnect to remount the row.',
+      'hint.staleTools': '{n} tools are still registered from an earlier successful connection — that no longer means the server is reachable.',
       'hint.failed': 'This row failed to load. Expand it for the error; Reconnect remounts it.',
       'hint.disabled': 'Disabled: no connection is attempted and no tools are registered.',
       'hint.pending': 'The MCP client is starting; this list refreshes automatically.',
@@ -148,7 +154,7 @@ window.__ModuleLoader__.load({
 .mcpPanel-row{display:flex;align-items:center;gap:10px;padding:11px 13px;min-width:0}
 .mcpPanel-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--dsw-alias-state-idle-primary)}
 .mcpPanel-dot[data-state=connected]{background:var(--dsw-alias-state-success-primary)}
-.mcpPanel-dot[data-state=idle]{background:var(--dsw-alias-state-error-primary)}
+.mcpPanel-dot[data-state=idle],.mcpPanel-dot[data-state=unreachable]{background:var(--dsw-alias-state-error-primary)}
 .mcpPanel-dot[data-state=failed]{background:var(--dsw-alias-state-error-primary)}
 .mcpPanel-dot[data-state=connecting]{background:var(--dsw-alias-state-warn-primary);animation:mcpPanel-pulse 1.2s ease-in-out infinite}
 @keyframes mcpPanel-pulse{0%,100%{opacity:1}50%{opacity:.35}}
@@ -157,7 +163,7 @@ window.__ModuleLoader__.load({
 .mcpPanel-name{font-size:13.5px;font-weight:600;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mcpPanel-state{font-size:11.5px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
 .mcpPanel-state[data-state=connected]{color:var(--dsw-alias-state-success-primary)}
-.mcpPanel-state[data-state=idle],.mcpPanel-state[data-state=failed]{color:var(--dsw-alias-state-error-primary)}
+.mcpPanel-state[data-state=idle],.mcpPanel-state[data-state=failed],.mcpPanel-state[data-state=unreachable]{color:var(--dsw-alias-state-error-primary)}
 .mcpPanel-target{font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--dsw-font-family-code,ui-monospace,SFMono-Regular,Menlo,monospace)}
 .mcpPanel-tools{font-size:11px;color:var(--dsw-alias-label-secondary);border:.5px solid var(--dsw-alias-border-l1);border-radius:6px;padding:1px 6px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .mcpPanel-link{appearance:none;border:0;background:0 0;padding:0 2px;font:inherit;font-size:11.5px;color:var(--dsw-alias-brand-primary);cursor:pointer;white-space:nowrap}
@@ -302,9 +308,14 @@ window.__ModuleLoader__.load({
       const testResult = busy?.result;
 
       const hint = state === 'idle' ? t('hint.idle')
-        : state === 'failed' ? t('hint.failed')
-        : state === 'disabled' ? t('hint.disabled')
-        : state === 'connecting' ? t('hint.pending')
+        : state === 'unreachable' ? t('hint.unreachable')
+          : state === 'failed' ? t('hint.failed')
+            : state === 'disabled' ? t('hint.disabled')
+              : state === 'connecting' ? t('hint.pending')
+                : null;
+      // 连接已不可达、但工具还留在注册表里：那是上一次连接成功留下的残留，必须说清楚。
+      const staleTools = state === 'unreachable' && (server.toolCount ?? 0) > 0
+        ? t('hint.staleTools', { n: server.toolCount })
         : null;
 
       const fields = [
@@ -333,6 +344,15 @@ window.__ModuleLoader__.load({
 
       const notes = [];
       if (hint) notes.push(h('div', { key: 'hint', className: 'mcpPanel-note' }, hint));
+      if (staleTools) notes.push(h('div', { key: 'stale', className: 'mcpPanel-note', 'data-tone': 'bad' }, staleTools));
+      // 服务端记住的上一次「测试连接」结论（刷新后仍在），让徽标与错误保持一致。
+      if (server.probe?.ok === false && server.probe.error && !testResult) {
+        notes.push(h('div', {
+          key: 'probe',
+          className: 'mcpPanel-note',
+          'data-tone': 'bad',
+        }, `${t('test.fail')}：${server.probe.error}${server.probe.durationMs !== null ? ` (${server.probe.durationMs} ms)` : ''}`));
+      }
       if (server.error) notes.push(h('div', { key: 'error', className: 'mcpPanel-note', 'data-tone': 'bad' }, server.error));
       if (testResult) {
         notes.push(h('div', {
@@ -366,7 +386,7 @@ window.__ModuleLoader__.load({
               { className: 'mcpPanel-nameLine' },
               h('span', { className: 'mcpPanel-name', title: server.serverName }, server.serverName),
               h('span', { className: 'mcpPanel-state', 'data-state': state }, stateLabel(t, state)),
-              state === 'connected' || state === 'idle'
+              state === 'connected' || state === 'idle' || state === 'unreachable'
                 ? h(
                   'span',
                   { className: 'mcpPanel-tools' },
@@ -511,8 +531,10 @@ window.__ModuleLoader__.load({
             if (next[id]) next[id] = { ...next[id], kind: undefined };
             return next;
           });
+          // 宿主会把这次探测结果记下来并参与状态判定；立刻拉一次快照，徽标不用等下一轮 4 s 轮询。
+          load();
         }
-      }, [setBusyFor]);
+      }, [load, setBusyFor]);
 
       const retry = useCallback(async (server) => {
         const id = server.id;

@@ -9,7 +9,7 @@ An MCP server panel for the DeepSeek Harness Web GUI: it lists every `@deepseek-
 | 问题 | 来源（宿主侧事实，不是猜测） |
 | --- | --- |
 | 有哪些 MCP 服务器？ | 遍历 `ctx.loader.entries()` 里所有 `@deepseek-ai/dsh-mcp-client` 行：profile 补丁、home 补丁、插件包插入的行都算，**与宿主实际在跑的东西一致** |
-| 连上了没有？ | loader fiber 的 state（已停用 / 加载失败 / 启动中 / 运行中）**加上**工具注册表里 `mcp__<server>__*` 的条数。连不上时 `mcp-client` 不抛错（`failOnStartupError` 默认 false），fiber 照样 active、工具一个没有——这一条正是「已连接」与「假装已连接」的分界 |
+| 连上了没有？ | 三份证据：loader fiber 的 state（已停用 / 加载失败 / 启动中 / 运行中）、工具注册表里 `mcp__<server>__*` 的条数、以及 streamable-http 行每次刷新时的 TCP 端口探活。连不上时 `mcp-client` 不抛错（`failOnStartupError` 默认 false），fiber 照样 active——而**工具条数只证明「曾经连上过」**：服务器后来死掉时工具不会注销，所以端口探活和最近一次「测试连接」的结论会推翻那个绿点 |
 | 为什么没连上？ | 「测试连接」用宿主同一份配置真做一次 JSON-RPC 握手（stdio 起进程 / http 打请求），把 `ECONNREFUSED`、`HTTP 401`、超时原文贴回行内 |
 
 ## 两个座位
@@ -41,7 +41,8 @@ An MCP server panel for the DeepSeek Harness Web GUI: it lists every `@deepseek-
 ## 显示约定
 
 - 样式只用 `--dsw-alias-*` 主题令牌，跟随宿主明暗主题；文案走 `ctx.locale`（zh / en）。
-- 状态色：绿=已连接；红=未连接/加载失败；黄（呼吸）=启动中；灰=已停用。
+- 状态色：绿=已连接；红=未连接/不可达/加载失败；黄（呼吸）=启动中；灰=已停用。
+- 「不可达」= 端口连不上，或最近一次测试失败：徽标立即变红，展开区给出原因；若工具还挂在注册表里，会单独说明那是上一次连接的残留。
 - 行的展开区给出传输、命令/地址、env/header **名字**（不显示值）、重连策略、调用超时、来源补丁
   文件、条目 id，以及失败原因。
 
