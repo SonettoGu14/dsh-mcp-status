@@ -33,6 +33,7 @@ window.__ModuleLoader__.load({
       'panel.emptyHint': '在 设置 → 插件 → MCP 服务器配置 里添加，或把 mcp-client 行写进 profile 补丁。',
       'state.connected': '已连接',
       'state.connecting': '连接中',
+      'state.reconnecting': '重连中',
       'state.idle': '未连接',
       'state.unreachable': '未连接（不可达）',
       'state.failed': '加载失败',
@@ -51,6 +52,7 @@ window.__ModuleLoader__.load({
       'action.showConfig': '配置',
       'action.hideConfig': '收起',
       'field.transport': '传输',
+      'field.client': '连接状态',
       'field.command': '命令',
       'field.url': '地址',
       'field.env': '环境变量',
@@ -59,15 +61,27 @@ window.__ModuleLoader__.load({
       'field.entry': '条目',
       'field.reason': '判定',
       'field.evidence': '依据',
-      'panel.updated': '已更新 {n}s 前',
+      'panel.changed': '状态变化 {n}s 前',
       'reason.disabled': '已停用（用户选择，不是故障）',
       'reason.fiber-failed': 'MCP 客户端加载失败',
       'reason.pending': '客户端正在启动',
+      'reason.client-connecting': '客户端正在建立连接',
+      'reason.client-reconnecting': '客户端正在自动重连',
+      'reason.gave-up': '自动重连已放弃（连续失败达到上限，工具已卸载）',
+      'reason.client-failed': '客户端连接失败',
+      'reason.client-closed': '客户端已关闭',
+      'reason.waiting-credentials': '等待凭据',
       'reason.probe-failed': '最近一次连接测试失败',
       'reason.tcp-refused': '端口拒绝连接',
       'reason.no-tools': '没有注册任何工具',
       'reason.connected': '已连接',
       'reason.unknown-tools': '工具表读不到，不下结论',
+      'evidence.client': '客户端',
+      'evidence.connecting': '连接中',
+      'evidence.connected': '已连接',
+      'evidence.reconnecting': '重连中',
+      'evidence.closed': '已关闭',
+      'evidence.waiting-credentials': '等待凭据',
       'evidence.fiber': 'fiber',
       'evidence.tools': '工具',
       'evidence.tcp': 'TCP',
@@ -84,6 +98,9 @@ window.__ModuleLoader__.load({
       'hint.notToggleable': '该服务器由插件包提供，不能在面板里开关',
       'hint.idle': 'MCP 客户端已加载，但没有注册任何工具——通常意味着连接失败。点「测试连接」看原因。',
       'hint.unreachable': '最近一次连接检测失败：下面的错误就是原因。修好后点「重试」重新挂载这一行。',
+      'hint.reconnecting': '客户端正在自动重连，工具暂时不可用；连上后面板会自动变绿。',
+      'hint.reconnectingN': '客户端正在自动重连（第 {n}/{max} 次），工具暂时不可用；连上后面板会自动变绿。',
+      'hint.gaveUp': '自动重连已放弃，工具已卸载——「重试」会重新挂载这一行，重连预算从头算。',
       'hint.staleTools': '工具仍然注册着（{n} 个），那是上一次连接成功留下的，不代表现在连着——连接已失效。',
       'hint.failed': '这一行加载失败，展开可看错误信息；「重试」会重新挂载它。',
       'hint.disabled': '已停用：不会连接，也不占工具表。',
@@ -105,6 +122,7 @@ window.__ModuleLoader__.load({
       'panel.emptyHint': 'Add one under Settings → Plugins → MCP server configuration, or write an mcp-client row into the profile patch.',
       'state.connected': 'Connected',
       'state.connecting': 'Connecting',
+      'state.reconnecting': 'Reconnecting',
       'state.idle': 'Not connected',
       'state.unreachable': 'Unreachable',
       'state.failed': 'Failed',
@@ -123,6 +141,7 @@ window.__ModuleLoader__.load({
       'action.showConfig': 'Config',
       'action.hideConfig': 'Hide',
       'field.transport': 'Transport',
+      'field.client': 'Connection',
       'field.command': 'Command',
       'field.url': 'URL',
       'field.env': 'Environment',
@@ -131,15 +150,27 @@ window.__ModuleLoader__.load({
       'field.entry': 'Entry',
       'field.reason': 'Verdict',
       'field.evidence': 'Evidence',
-      'panel.updated': 'updated {n}s ago',
+      'panel.changed': 'changed {n}s ago',
       'reason.disabled': 'disabled by choice — not a fault',
       'reason.fiber-failed': 'the MCP client failed to load',
       'reason.pending': 'the MCP client is starting',
+      'reason.client-connecting': 'the MCP client is connecting',
+      'reason.client-reconnecting': 'the MCP client is retrying the connection',
+      'reason.gave-up': 'reconnect gave up (attempt limit reached, tools unregistered)',
+      'reason.client-failed': 'the MCP connection failed',
+      'reason.client-closed': 'the MCP client is closed',
+      'reason.waiting-credentials': 'waiting for credentials',
       'reason.probe-failed': 'the last connection test failed',
       'reason.tcp-refused': 'the port refuses connections',
       'reason.no-tools': 'no tools registered',
       'reason.connected': 'connected',
       'reason.unknown-tools': 'tool registry unreadable — no verdict',
+      'evidence.client': 'client',
+      'evidence.connecting': 'connecting',
+      'evidence.connected': 'connected',
+      'evidence.reconnecting': 'reconnecting',
+      'evidence.closed': 'closed',
+      'evidence.waiting-credentials': 'waiting credentials',
       'evidence.fiber': 'fiber',
       'evidence.tools': 'tools',
       'evidence.tcp': 'TCP',
@@ -156,6 +187,9 @@ window.__ModuleLoader__.load({
       'hint.notToggleable': 'Provided by a plugin package; it cannot be switched here',
       'hint.idle': 'The MCP client is loaded but registered no tools — usually a failed connection. Test it to see why.',
       'hint.unreachable': 'The latest connection check failed; the error below says why. Fix it, then use Reconnect to remount the row.',
+      'hint.reconnecting': 'The MCP client is retrying the connection; tools are unavailable meanwhile. The dot turns green once it reconnects.',
+      'hint.reconnectingN': 'The MCP client is retrying the connection (attempt {n} of {max}); tools are unavailable meanwhile.',
+      'hint.gaveUp': 'Reconnecting gave up and the tools were unregistered — Reconnect remounts just this row with a fresh attempt budget.',
       'hint.staleTools': '{n} tools are still registered from an earlier successful connection — that no longer means the server is reachable.',
       'hint.failed': 'This row failed to load. Expand it for the error; Reconnect remounts it.',
       'hint.disabled': 'Disabled: no connection is attempted and no tools are registered.',
@@ -200,7 +234,7 @@ window.__ModuleLoader__.load({
 .mcpPanel-dot[data-state=connected]{background:var(--dsw-alias-state-success-primary)}
 .mcpPanel-dot[data-state=idle],.mcpPanel-dot[data-state=unreachable]{background:var(--dsw-alias-state-error-primary)}
 .mcpPanel-dot[data-state=failed]{background:var(--dsw-alias-state-error-primary)}
-.mcpPanel-dot[data-state=connecting]{background:var(--dsw-alias-state-warn-primary);animation:mcpPanel-pulse 1.2s ease-in-out infinite}
+.mcpPanel-dot[data-state=connecting],.mcpPanel-dot[data-state=reconnecting]{background:var(--dsw-alias-state-warn-primary);animation:mcpPanel-pulse 1.2s ease-in-out infinite}
 @keyframes mcpPanel-pulse{0%,100%{opacity:1}50%{opacity:.35}}
 .mcpPanel-id{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
 .mcpPanel-nameLine{display:flex;align-items:baseline;gap:8px;min-width:0}
@@ -208,6 +242,7 @@ window.__ModuleLoader__.load({
 .mcpPanel-state{font-size:11.5px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
 .mcpPanel-state[data-state=connected]{color:var(--dsw-alias-state-success-primary)}
 .mcpPanel-state[data-state=idle],.mcpPanel-state[data-state=failed],.mcpPanel-state[data-state=unreachable]{color:var(--dsw-alias-state-error-primary)}
+.mcpPanel-state[data-state=reconnecting]{color:var(--dsw-alias-state-warn-primary)}
 .mcpPanel-target{font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--dsw-font-family-code,ui-monospace,SFMono-Regular,Menlo,monospace)}
 .mcpPanel-tools{font-size:11px;color:var(--dsw-alias-label-secondary);border:.5px solid var(--dsw-alias-border-l1);border-radius:6px;padding:1px 6px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .mcpPanel-link{appearance:none;border:0;background:0 0;padding:0 2px;font:inherit;font-size:11.5px;color:var(--dsw-alias-brand-primary);cursor:pointer;white-space:nowrap}
@@ -349,25 +384,40 @@ window.__ModuleLoader__.load({
       return text === key ? (server.reason ?? '') : text;
     }
 
+    /** 一条 evidence 的取值文案：code → 本地化，未知 code 原样显示（宿主新增状态不会变成空白）。 */
+    function evidenceValue(t, item) {
+      if (item.signal === 'tools') {
+        return item.value === null || item.value === undefined ? '?' : String(item.value);
+      }
+      if (item.signal === 'probe') {
+        return item.value === 'ok' ? t('evidence.ok') : (item.detail ?? t('evidence.failed'));
+      }
+      const key = `evidence.${item.value}`;
+      const text = t(key);
+      const base = text === key ? String(item.value) : text;
+      return item.detail ? `${base} ${item.detail}` : base;
+    }
+
     /** 依据摘要：把 resolver 的 evidence 压成一行，带时间戳的项标注多久以前。 */
     function describeEvidence(t, server) {
       const now = Date.now();
-      const parts = [];
-      for (const item of server.evidence ?? []) {
+      return (server.evidence ?? []).map((item) => {
         const label = t(`evidence.${item.signal}`);
-        if (item.signal === 'tools') {
-          parts.push(`${label} ${item.value === null || item.value === undefined ? '?' : item.value}`);
-          continue;
-        }
-        const value = item.signal === 'fiber'
-          ? t(`evidence.${item.value}`)
-          : item.signal === 'tcp'
-            ? t(`evidence.${item.value}`)
-            : item.value === 'ok' ? t('evidence.ok') : (item.detail ?? t('evidence.failed'));
         const age = typeof item.at === 'number' ? ` (${Math.max(0, Math.round((now - item.at) / 1000))}s)` : '';
-        parts.push(`${label} ${value}${age}`);
+        return `${label} ${evidenceValue(t, item)}${age}`;
+      }).join(' · ');
+    }
+
+    /** 宿主连接状态的一句话（重连带次数，失败带 reason code）。 */
+    function connectionLabel(t, connection) {
+      const key = `evidence.${connection.state}`;
+      const text = t(key);
+      const base = text === key ? String(connection.state) : text;
+      if (connection.state === 'reconnecting' && typeof connection.attempt === 'number') {
+        return `${base} ${connection.attempt}/${connection.maxAttempts ?? '?'}`;
       }
-      return parts.join(' · ');
+      if (connection.state === 'failed' && connection.reason) return `${base}（${connection.reason}）`;
+      return base;
     }
 
     function ServerCard({ server, t, busy, onToggle, onTest, onRetry, expanded, onExpand }) {
@@ -378,21 +428,29 @@ window.__ModuleLoader__.load({
       const testBusy = busy?.kind === 'test';
       const retryBusy = busy?.kind === 'retry';
       const testResult = busy?.result;
+      const connection = server.connection ?? undefined;
 
       const hint = state === 'idle' ? t('hint.idle')
-        : state === 'unreachable' ? t('hint.unreachable')
-          : state === 'failed' ? t('hint.failed')
-            : state === 'disabled' ? t('hint.disabled')
-              : state === 'connecting' ? t('hint.pending')
-                : null;
-      // 连接已不可达、但工具还留在注册表里：那是上一次连接成功留下的残留，必须说清楚。
-      const staleTools = state === 'unreachable' && (server.toolCount ?? 0) > 0
+        : state === 'reconnecting'
+          ? (typeof connection?.attempt === 'number'
+            ? t('hint.reconnectingN', { n: connection.attempt, max: connection.maxAttempts ?? '?' })
+            : t('hint.reconnecting'))
+          : state === 'unreachable' ? t('hint.unreachable')
+            : state === 'failed' && server.reason === 'gave-up' ? t('hint.gaveUp')
+              : state === 'failed' ? t('hint.failed')
+                : state === 'disabled' ? t('hint.disabled')
+                  : state === 'connecting' ? t('hint.pending')
+                    : null;
+      // 连接已不可用、但工具还留在注册表里：那是上一次连接成功留下的残留，必须说清楚。
+      const staleTools = (state === 'unreachable' || state === 'reconnecting' || state === 'failed')
+        && (server.toolCount ?? 0) > 0
         ? t('hint.staleTools', { n: server.toolCount })
         : null;
 
       const fields = [
         [t('field.transport'), transportLabel(server.transport) || '—'],
       ];
+      if (connection) fields.push([t('field.client'), connectionLabel(t, connection)]);
       if (server.transport === 'stdio') {
         fields.push([t('field.command'), server.detail.command ?? '—']);
         if (server.detail.args?.length) fields.push(['args', server.detail.args.join(' ')]);
@@ -461,7 +519,7 @@ window.__ModuleLoader__.load({
               { className: 'mcpPanel-nameLine' },
               h('span', { className: 'mcpPanel-name', title: server.serverName }, server.serverName),
               h('span', { className: 'mcpPanel-state', 'data-state': state }, stateLabel(t, state)),
-              state === 'connected' || state === 'idle' || state === 'unreachable'
+              state === 'connected' || state === 'idle' || state === 'unreachable' || state === 'reconnecting'
                 ? h(
                   'span',
                   { className: 'mcpPanel-tools' },
@@ -529,13 +587,23 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState({});
       const [expanded, setExpanded] = useState({});
       const [refreshing, setRefreshing] = useState(false);
+      const [changedAt, setChangedAt] = useState(null);
+      const signatureRef = useRef('');
       const mounted = useRef(true);
 
       const load = useCallback(async () => {
         try {
           const payload = await requestJson('/servers', { method: 'GET' });
           if (!mounted.current) return;
-          setSnapshot({ loading: false, servers: payload.servers ?? [], error: null, checkedAt: payload.checkedAt });
+          const servers = payload.servers ?? [];
+          // 顶栏计时的是「上次状态变化」：只有某行的 state/reason 真的变了才重新计时。
+          // 用采快照的时间会是个自指量（每次请求都刚采过，永远是 0s），没有信息量。
+          const signature = servers
+            .map((server) => `${server.id}:${server.state}:${server.reason}`)
+            .join('|');
+          if (signatureRef.current !== '' && signatureRef.current !== signature) setChangedAt(Date.now());
+          signatureRef.current = signature;
+          setSnapshot({ loading: false, servers, error: null, checkedAt: payload.checkedAt });
         } catch (error) {
           if (!mounted.current) return;
           setSnapshot((previous) => ({ ...previous, loading: false, error: error?.message ?? String(error) }));
@@ -658,11 +726,9 @@ window.__ModuleLoader__.load({
           h('div', { className: 'mcpPanel-title' }, t('panel.title')),
           h('div', { className: 'mcpPanel-sub' }, snapshot.loading
             ? '…'
-            : `${snapshot.servers.length} MCP · ${t('panel.updated', {
-              n: snapshot.checkedAt === undefined
-                ? 0
-                : Math.max(0, Math.round((Date.now() - snapshot.checkedAt) / 1000)),
-            })}`),
+            : `${snapshot.servers.length} MCP${changedAt === null ? '' : ` · ${t('panel.changed', {
+              n: Math.max(0, Math.round((Date.now() - changedAt) / 1000)),
+            })}`}`),
         ),
         h(
           'div',

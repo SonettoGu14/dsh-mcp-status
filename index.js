@@ -98,6 +98,26 @@ function findRowBlock(lines, id) {
   return undefined;
 }
 
+/**
+ * 补丁文件里这一行的 disabled 状态。
+ * @returns true / false；返回 undefined 表示这些补丁文件里都没有这一行。
+ */
+async function patchRowDisabled(ctx, id) {
+  for (const file of candidatePatchFiles(ctx)) {
+    let text;
+    try {
+      text = await readFile(file.path, 'utf8');
+    } catch {
+      continue;
+    }
+    const lines = text.split(/\r?\n/);
+    const block = findRowBlock(lines, id);
+    if (block === undefined) continue;
+    return block.disabledIndex !== undefined;
+  }
+  return undefined;
+}
+
 /** 原子写：同目录临时文件 + rename，保留原文件权限位。 */
 async function writeAtomic(file, content) {
   let mode;
@@ -297,9 +317,11 @@ async function collect(ctx, settings, { withSources = true } = {}) {
     const summary = summarize(config);
     const reach = reachable[index];
     const probe = storedProbe(entry.options.id);
+    const connection = connectionOf(entry);
     const status = resolveStatus({
       disabled: Boolean(entry.disabled),
       fiberState: entry.fiber?.state ?? null,
+      connection,
       toolCount: count === undefined ? null : count,
       reachable: reach === null ? null : reach.ok,
       reachableAt: reach === null ? null : reach.at,
@@ -326,6 +348,7 @@ async function collect(ctx, settings, { withSources = true } = {}) {
       evidence: status.evidence,
       disabled: Boolean(entry.disabled),
       fiberState: entry.fiber?.state ?? null,
+      connection: connection ?? null,
       toolCount: count === undefined ? null : count,
       reachable: reach === null ? null : reach.ok,
       reachDetail: reach === null ? null : reach.detail,
@@ -364,6 +387,35 @@ function errorOf(entry) {
   const error = entry.fiber?.error;
   const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
   return message === '' ? 'MCP 客户端加载失败' : message;
+}
+
+/**
+ * 读宿主 `dsh-mcp-client` 自己的连接状态——它是唯一权威的「到底连上没有」。
+ *
+ * `connectionStatusOf(fiber)` 返回一个 status cell，`current()` 给出
+ * connecting / connected / reconnecting(attempt,maxAttempts) / failed(reason) /
+ * closed / waiting-credentials。拿不到（旧宿主、条目还没 import）就返回 undefined，
+ * 由 resolveStatus 退回观测值推导。宿主状态存在时，我们自己的探测只是旁证。
+ */
+function connectionOf(entry) {
+  const read = entry?.moduleNamespace?.connectionStatusOf;
+  if (typeof read !== 'function' || entry.fiber === undefined) return undefined;
+  try {
+    const cell = read(entry.fiber);
+    const status = typeof cell?.current === 'function' ? cell.current() : undefined;
+    if (status === undefined || status === null || typeof status.state !== 'string') return undefined;
+    return {
+      state: status.state,
+      reason: status.reason ?? null,
+      attempt: status.attempt ?? null,
+      maxAttempts: status.maxAttempts ?? null,
+      lastError: typeof status.lastError === 'string'
+        ? status.lastError
+        : status.lastError?.message ?? null,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -423,7 +475,34 @@ async function waitForState(ctx, config, tracker, id, accept, timeoutMs) {
   return last;
 }
 
-/** 主动重排一次：补丁监听没接上时用它把行重新挂载（= 重新连接）。 */
+/**
+ * 重连 = 真的把这一行重新挂载：dispose 旧 fiber，再走一次冷启动（`init`）。
+ *
+ * HMR 的 `reconcileProfile` 只在「源文件真的变了」时才重挂条目，配置没变时什么都不做
+ * ——所以不能拿它当重试（只会白等 startupWaitMs）；而 `dsh-mcp-client` 放弃重连后自己的
+ * 提示就是「reload the plugin or restart the Host」，这里做的正是前者，且只影响这一行。
+ */
+async function restartEntry(ctx, id) {
+  const loader = ctx.get('loader');
+  const entry = loader === undefined || typeof loader.entries !== 'function'
+    ? undefined
+    : [...loader.entries()].find((item) => item?.options?.id === id);
+  if (entry === undefined) throw new Error(`未找到 MCP 服务器条目：${id}`);
+  // 用户自己在补丁文件里停用的行，重试不该把它强行拉起来。
+  if (await patchRowDisabled(ctx, id)) {
+    throw new Error('这一行在补丁文件里是停用状态：先打开开关再重试');
+  }
+  // 宿主没有可复用的 init/dispose 契约时返回 false，让调用方退回 HMR 重排。
+  if (typeof entry.init !== 'function' || entry.fiber === undefined) return false;
+  await entry.fiber.dispose();
+  // 加载器会把「不是它自己卸载的」条目标记成 disabled，避免立刻自动重挂；
+  // 这里要的恰恰是重挂，所以先把标记清掉，否则条目会一直显示为已停用。
+  if (entry.options !== undefined) entry.options.disabled = false;
+  await entry.init();
+  return true;
+}
+
+/** 兜底：补丁监听没接上时用它重排一次（只在源文件变化时才真的重挂）。 */
 async function forceReload(ctx, id) {
   const hmr = ctx.get('hmr');
   if (hmr === undefined || typeof hmr.reconcileProfile !== 'function') return false;
@@ -477,20 +556,32 @@ async function reconnect(ctx, config, tracker, id) {
   const before = await tracker.refresh(true);
   const row = before.servers.find((server) => server.id === id);
   if (row === undefined) throw new Error(`未找到 MCP 服务器条目：${id}`);
+  // 重新挂载就是一次新连接：旧的测试结论不再适用。
   probeResults.delete(id);
   reachCache.clear();
-  let attempts = 1;
-  await forceReload(ctx, id);
-  let current = await waitForState(ctx, config, tracker, id, (server) => server.state === 'connected', config.startupWaitMs);
-  while (current !== undefined && current.state !== 'connected' && attempts <= RETRY_ROUNDS) {
+
+  const accept = (server) => server.state === 'connected';
+  let attempts = 0;
+  let current;
+  let restarted = false;
+  while (attempts <= RETRY_ROUNDS) {
     attempts += 1;
-    await forceReload(ctx, id);
-    current = await waitForState(ctx, config, tracker, id, (server) => server.state === 'connected', config.startupWaitMs);
+    // restartEntry 只在「真的没法重挂」时返回 false；它抛错是用户该看到的原因
+    // （行在补丁文件里被停用、条目找不到、dispose/init 失败），直接冒到路由。
+    restarted = await restartEntry(ctx, id);
+    if (!restarted) restarted = await forceReload(ctx, id);
+    if (!restarted) break;
+    // 重挂本身很快（握手几百毫秒），先用短窗口等；同一次请求里第二轮才等满 startupWaitMs。
+    const window = attempts === 1 ? Math.min(3000, config.startupWaitMs) : config.startupWaitMs;
+    current = await waitForState(ctx, config, tracker, id, accept, window);
+    if (current !== undefined && accept(current)) break;
   }
+
   return {
     state: current?.state ?? 'unknown',
-    settled: current?.state === 'connected',
+    settled: current !== undefined && accept(current),
     attempts,
+    restarted,
     server: current ?? null,
   };
 }

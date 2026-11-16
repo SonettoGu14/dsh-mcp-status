@@ -198,7 +198,134 @@ const cases = [
     });
   }],
 
-  // ----------------------------------------------------------- serverNameFromTool
+  // ------------------------------------------------- host connection status
+
+  ['resolveStatus: host connecting → pending/client-connecting', () => {
+    const result = resolveStatus({
+      fiberState: FIBER_ACTIVE,
+      connection: { state: 'connecting' },
+      toolCount: 0,
+      now: NOW,
+    });
+    assert.equal(result.state, 'pending');
+    assert.equal(result.reason, 'client-connecting');
+  }],
+
+  ['resolveStatus: host reconnecting → reconnecting + attempt in evidence', () => {
+    const result = resolveStatus({
+      fiberState: FIBER_ACTIVE,
+      connection: { state: 'reconnecting', attempt: 3, maxAttempts: 10 },
+      toolCount: 0,
+      now: NOW,
+    });
+    assert.equal(result.state, 'reconnecting');
+    assert.equal(result.reason, 'client-reconnecting');
+    assert.deepEqual(result.evidence.at(-1), {
+      signal: 'client',
+      value: 'reconnecting',
+      at: null,
+      detail: '3/10',
+    });
+  }],
+
+  ['resolveStatus: host gave up wins over a successful probe (no more fake green)', () => {
+    const result = resolveStatus({
+      fiberState: FIBER_ACTIVE,
+      connection: { state: 'failed', reason: 'gave-up', maxAttempts: 10, lastError: 'connect ECONNREFUSED' },
+      toolCount: 0,
+      reachable: true,
+      reachableAt: NOW,
+      probe: { ok: true, at: NOW, toolsCount: 49 },
+      now: NOW,
+    });
+    assert.equal(result.state, 'failed');
+    assert.equal(result.reason, 'gave-up');
+  }],
+
+  ['resolveStatus: host failed (other reasons) → failed/client-failed', () => {
+    for (const reason of ['unclosed-generation', 'reconnect-disabled', undefined]) {
+      const result = resolveStatus({
+        fiberState: FIBER_ACTIVE,
+        connection: reason === undefined ? { state: 'failed' } : { state: 'failed', reason },
+        toolCount: 2,
+        now: NOW,
+      });
+      assert.equal(result.state, 'failed', `reason=${String(reason)}`);
+      assert.equal(result.reason, 'client-failed', `reason=${String(reason)}`);
+    }
+  }],
+
+  ['resolveStatus: host closed / waiting-credentials → failed', () => {
+    const closed = resolveStatus({
+      fiberState: FIBER_ACTIVE, connection: { state: 'closed' }, toolCount: 0, now: NOW,
+    });
+    assert.equal(closed.state, 'failed');
+    assert.equal(closed.reason, 'client-closed');
+
+    const waiting = resolveStatus({
+      fiberState: FIBER_ACTIVE, connection: { state: 'waiting-credentials' }, toolCount: 0, now: NOW,
+    });
+    assert.equal(waiting.state, 'failed');
+    assert.equal(waiting.reason, 'waiting-credentials');
+  }],
+
+  ['resolveStatus: host connected + tools → connected, client evidence present', () => {
+    const result = resolveStatus({
+      fiberState: FIBER_ACTIVE,
+      connection: { state: 'connected' },
+      toolCount: 49,
+      reachable: true,
+      reachDetail: 'ok',
+      reachableAt: NOW,
+      now: NOW,
+    });
+    assert.equal(result.state, 'connected');
+    assert.equal(result.reason, 'connected');
+    assert.equal(result.evidence.at(-1).signal, 'client');
+  }],
+
+  ['resolveStatus: host connected but a fresh failed probe still means unreachable', () => {
+    const result = resolveStatus({
+      fiberState: FIBER_ACTIVE,
+      connection: { state: 'connected' },
+      toolCount: 3,
+      reachable: true,
+      reachDetail: 'ok',
+      reachableAt: NOW,
+      probe: { ok: false, at: NOW, error: 'handshake failed' },
+      now: NOW,
+      probeAssertMs: PROBE_ASSERT_MS,
+    });
+    assert.equal(result.state, 'unreachable');
+    assert.equal(result.reason, 'probe-failed');
+  }],
+
+  ['resolveStatus: host connected + 0 tools → idle/no-tools', () => {
+    const result = resolveStatus({
+      fiberState: FIBER_ACTIVE,
+      connection: { state: 'connected' },
+      toolCount: 0,
+      now: NOW,
+    });
+    assert.equal(result.state, 'idle');
+    assert.equal(result.reason, 'no-tools');
+  }],
+
+  ['resolveStatus: unknown host state falls back to observational derivation', () => {
+    const result = resolveStatus({
+      fiberState: FIBER_ACTIVE,
+      connection: { state: 'some-future-state' },
+      toolCount: 4,
+      reachable: true,
+      reachDetail: 'ok',
+      reachableAt: NOW,
+      now: NOW,
+    });
+    assert.equal(result.state, 'connected');
+    assert.equal(result.reason, 'connected');
+  }],
+
+  // ---------------------------------------------------------- serverNameFromTool
 
   ['serverNameFromTool: extracts the server segment of an MCP tool name', () => {
     assert.equal(serverNameFromTool('mcp__unityMCP__manage_scene'), 'unityMCP');
@@ -278,6 +405,42 @@ const cases = [
     assert.ok(!message.includes('\n'), 'guard message must stay one line');
   }],
 
+  ['decideGuard: reconnecting row is refused with the attempt count', () => {
+    const message = decideGuard({
+      toolName: 'mcp__unityMCP__manage_scene',
+      row: {
+        serverName: 'unityMCP',
+        target: 'http://127.0.0.1:9/mcp',
+        state: 'reconnecting',
+        connection: { state: 'reconnecting', attempt: 4, maxAttempts: 10 },
+      },
+      snapshotAt: NOW - 1000,
+      now: NOW,
+      config: DEFAULT_CONFIG,
+    });
+    assert.equal(typeof message, 'string');
+    assert.ok(message.includes('reconnecting'), message);
+    assert.ok(message.includes('4 of 10'), message);
+  }],
+
+  ['decideGuard: gave-up row explains the attempt limit', () => {
+    const message = decideGuard({
+      toolName: 'mcp__unityMCP__manage_scene',
+      row: {
+        serverName: 'unityMCP',
+        target: 'http://127.0.0.1:9/mcp',
+        state: 'failed',
+        reason: 'gave-up',
+        connection: { state: 'failed', reason: 'gave-up', maxAttempts: 10 },
+      },
+      snapshotAt: NOW - 1000,
+      now: NOW,
+      config: DEFAULT_CONFIG,
+    });
+    assert.equal(typeof message, 'string');
+    assert.ok(message.includes('gave up after 10'), message);
+  }],
+
   // ------------------------------------------------------------ buildHealthText
 
   ['buildHealthText: no unhealthy rows → empty string', () => {
@@ -331,6 +494,21 @@ const cases = [
     assert.ok(text.length <= 120, `length=${text.length}`);
     assert.equal(text.length, 120);
     assert.ok(text.endsWith('…'), text);
+  }],
+
+  ['buildHealthText: gave-up row says the client stopped reconnecting', () => {
+    const text = buildHealthText({
+      servers: [{
+        serverName: 'unityMCP',
+        target: 'http://127.0.0.1:8080/mcp',
+        state: 'failed',
+        reason: 'gave-up',
+        toolCount: 0,
+        checkedAt: NOW,
+      }],
+    }, { now: NOW });
+    assert.ok(text.includes('reconnect gave up'), text);
+    assert.ok(text.includes('unityMCP'), text);
   }],
 
   // ------------------------------------------------------------- normalizeConfig

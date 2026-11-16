@@ -23,7 +23,7 @@ An MCP server panel for the DeepSeek Harness Web GUI: it lists every `@deepseek-
 | --- | --- |
 | `GET /api/dsh-mcp-status/servers` | 快照：每行的状态、工具数、传输与地址、来源补丁文件、超时与重连策略 |
 | `POST /api/dsh-mcp-status/toggle` | `{ id, enabled }`：改补丁行 → 等热重载 → 返回新状态（超时后主动重排一次） |
-| `POST /api/dsh-mcp-status/retry` | `{ id }`：重新挂载这一行（= 重新连接） |
+| `POST /api/dsh-mcp-status/retry` | `{ id }`：真正重新挂载这一行（`dispose` 旧 fiber + `init` 冷启动，重连预算清零），不是等 HMR 碰运气 |
 | `POST /api/dsh-mcp-status/test` | `{ id }`：真握手，返回协议版本 / serverInfo / 工具数 / 失败原因 |
 
 写操作要求同源证明，且所有路由都只接受回环来源。
@@ -40,21 +40,28 @@ An MCP server panel for the DeepSeek Harness Web GUI: it lists every `@deepseek-
 
 ## 状态判定表（每条结论都带依据）
 
-状态由 `lib/status.js` 的 `resolveStatus()` 纯函数推导，优先级从上到下：
+状态由 `lib/status.js` 的 `resolveStatus()` 纯函数推导。**第一优先是宿主自己的连接状态**
+（`@deepseek-ai/dsh-mcp-client` 导出的 `connectionStatusOf(fiber)`，从 loader 条目的
+`moduleNamespace` 取），探活和工具数只在宿主说「已连接」时做旁证：
 
 | 顺序 | 条件 | 状态 | reason |
 | --- | --- | --- | --- |
 | 1 | 行被停用 | 已停用 | `disabled`（用户选择，不是故障） |
 | 2 | loader fiber 失败 | 加载失败 | `fiber-failed` |
-| 3 | fiber 未就绪 | 启动中 | `pending` |
-| 4 | 最近一次测试失败，且端口不通或结论在 `probeAssertMs` 内 | 不可达 | `probe-failed` |
-| 5 | streamable-http 端口拒绝连接 / 超时 | 不可达 | `tcp-refused` |
-| 6 | 最近一次测试成功 | 已连接 | `connected` |
-| 7 | 工具表读不到 | 已连接 | `unknown-tools`（不下结论） |
-| 8 | 有工具 / 没有工具 | 已连接 / 未连接 | `connected` / `no-tools` |
+| 3 | 宿主客户端正在首次连接 | 启动中 | `client-connecting` |
+| 4 | 宿主客户端正在重连（第 n/N 次） | 重连中 | `client-reconnecting`（依据里带 n/N） |
+| 5 | 宿主客户端已放弃（连续 10 次失败后工具被注销） | 未连接 | `gave-up` |
+| 6 | 等凭证 / 连接已关闭 / 其它客户端失败 | 未连接 | `waiting-credentials` / `client-closed` / `client-failed` |
+| 7 | 宿主说已连接，但端口拒绝连接，或窗口内刚测失败 | 不可达 | `tcp-refused` / `probe-failed` |
+| 8 | 宿主说已连接，但工具数为 0 | 未连接 | `no-tools` |
+| 9 | 宿主说已连接，且有工具 | 已连接 | `connected` |
+| 10 | 读不到宿主状态（老版本 / 非 mcp-client 行） | 退回观测推导 | `unknown-tools` / `pending` … |
+
+第 4、5 条是 0.2.1 的关键修正：以前「重连中」和「已放弃」都被当成绿色——测试连接一成功还会把
+「已连接 + 0 工具」显示成已连接。现在客户端状态优先，成功握手不会压过它。
 
 第 8 条的 `no-tools`（界面显示「未连接」）刻意与 `unreachable` 分开：工具数为 0 可能只是这行挂在
-per-agent 作用域、全局注册表看不见，把它当断线会误报也会误拦。
+per-agent 作用域、全局注册表看不见，把它当断线会误报也会误拦——但它也不再被算作「已连接」。
 
 每行 DTO 带 `reason` 与 `evidence`（fiber / tools / tcp / probe 四个信号，带各自时间戳），
 展开区把依据压成一行——「凭什么绿/红」不再靠猜。
@@ -67,8 +74,8 @@ per-agent 作用域、全局注册表看不见，把它当断线会误报也会�
   `- unityMCP (http://127.0.0.1:8080/mcp): unreachable — connect ECONNREFUSED, checked 8s ago.`
   全部恢复后 section 会被注销——健康时 prompt 里不多一个空行。
 - **调用闸门**（`ctx.tools.guard`）：`mcp__<server>__*` 的调用在派发前被判为不可用就拒绝，返回可读原因
-  （含「去 MCP 面板重试」）。只有**证据够新**才会拦：快照超过 `2 × refreshMs` 视为过期，`pending`、
-  `no-tools`、`disabled` 一律放行——`idle` 不等于断线。
+  （含「去 MCP 面板重试」）。拦 `unreachable` / `failed` / `reconnecting`，且只有**证据够新**才会拦：
+  快照超过 `2 × refreshMs` 视为过期，`pending`、`no-tools`、`disabled` 一律放行——`idle` 不等于断线。
 
 两个消费方都能关：`promptHealth: false` / `guardUnreachable: false`（见下）。
 
@@ -89,9 +96,11 @@ per-agent 作用域、全局注册表看不见，把它当断线会误报也会�
 ## 显示约定
 
 - 样式只用 `--dsw-alias-*` 主题令牌，跟随宿主明暗主题；文案走 `ctx.locale`（zh / en）。
-- 状态色：绿=已连接；红=未连接/不可达/加载失败；黄（呼吸）=启动中；灰=已停用。
+- 状态色：绿=已连接；红=未连接/不可达/加载失败；黄（呼吸）=启动中/重连中；灰=已停用。
+- 顶栏副标题显示的是「状态变化 Ns 前」：面板每 4 s 轮询，但快照里的 `checkedAt` 每次拉取都会刷新，
+  所以它不表示新鲜度，只在某一行状态真的变了时计时。
 - 「不可达」= 端口连不上，或最近一次测试失败：徽标立即变红，展开区给出原因；若工具还挂在注册表里，会单独说明那是上一次连接的残留。
-- 行的展开区给出传输、命令/地址、env/header **名字**（不显示值）、重连策略、调用超时、来源补丁
+- 行的展开区给出传输、命令/地址、env/header **名字**（不显示值）、连接状态、重连策略、调用超时、来源补丁
   文件、条目 id、判定与依据，以及失败原因。
 
 ## 兼容与依赖
@@ -125,11 +134,13 @@ node lib/probe.test.mjs   # 5 个用例：stdio/http 成功、命令不存在、
 
 - 停用/启用会改写**当前 profile 的补丁文件**里那一行的 `disabled`；如果该行由其它工具生成（例如同步 MCP 配置的第三方工具），那个工具下次整表重写时可能覆盖本次开关的结果。
 - 面板只读配置、不做新增/编辑；新增与编辑仍在「设置 → 插件 → MCP 服务器配置」。
-- **stdio 行没有端口可探**：它们的存活只能靠工具数 + 用户点过「测试连接」的结论；`no-tools` 不会被当成断线。
-- **闸门可能误拦**：只有「快照新鲜 + 端口确实拒绝连接 / 刚测过失败」才拒绝，窗口过期一律放行；不放心就
+- **stdio 行没有端口可探**：它们的存活只能靠宿主连接状态 + 工具数；`no-tools` 不算断线，也不会被当成已连接。
+- **闸门可能误拦**：只有「快照新鲜 + 确实不可达 / 正在重连」才拒绝，窗口过期一律放行；不放心就
   `guardUnreachable: false`，退回纯看板行为。
-- **状态是推导的，不是客户端自报的**：DSH 的 `dsh-mcp-client` 目前不暴露连接状态，所以这里只能组合
-  fiber / 工具注册表 / TCP / 测试结论四份证据。真要让状态像 opencode 那样由客户端层拥有，需要上游提供接口。
+- **重试会短暂摘掉这一行的工具**：`dispose` + `init` 是冷启动，重连成功前 `mcp__<server>__*` 不在工具表里，
+  这是宿主 mcp-client 自己给出的唯一自救路径（它放弃重连时的提示就是「reload the plugin or restart the Host」）。
+- **宿主不暴露连接状态时退回推导**：0.2.1 起优先读 `connectionStatusOf(fiber)`；拿不到（老版本宿主、非
+  mcp-client 行）就退回 fiber / 工具注册表 / TCP / 测试结论四份证据，此时「重连中」无法区分。
 
 ## License
 
