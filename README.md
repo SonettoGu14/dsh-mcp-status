@@ -12,16 +12,18 @@ An MCP server panel for the DeepSeek Harness Web GUI: it lists every `@deepseek-
 | 连上了没有？ | 三份证据：loader fiber 的 state（已停用 / 加载失败 / 启动中 / 运行中）、工具注册表里 `mcp__<server>__*` 的条数、以及 streamable-http 行每次刷新时的 TCP 端口探活。连不上时 `mcp-client` 不抛错（`failOnStartupError` 默认 false），fiber 照样 active——而**工具条数只证明「曾经连上过」**：服务器后来死掉时工具不会注销，所以端口探活和最近一次「测试连接」的结论会推翻那个绿点 |
 | 为什么没连上？ | 「测试连接」用宿主同一份配置真做一次 JSON-RPC 握手（stdio 起进程 / http 打请求），把 `ECONNREFUSED`、`HTTP 401`、超时原文贴回行内 |
 
-## 两个座位
+## 三个座位
 
-- **侧边栏行**：`sidebar.panellist`，id `mcp`，order 40；
+- **侧边栏行**：`sidebar.panellist`，id `mcp`，order 40；图标右上角挂一个状态点（见下节）；
+- **侧栏收起态**：`sidebar.toggle.badge`，只在有服务器要处理时出现；
 - **中央面板**：`main` keyed 槽，key 也是 `mcp`。
 
-宿主维护一份状态缓存：后台每 `refreshMs`（默认 10 s）刷新，喂给 system prompt 与调用闸门；面板拉取时**当场重采**（探活有 2 s 缓存，其余全是内存读取），所以面板的新鲜度与以前一样。数据来自四条同源路由：
+宿主维护一份状态缓存：后台每 `refreshMs`（默认 10 s）刷新，喂给 system prompt 与调用闸门；面板拉取时**当场重采**（探活有 2 s 缓存，其余全是内存读取），所以面板的新鲜度与以前一样。数据来自五条同源路由：
 
 | 路由 | 作用 |
 | --- | --- |
 | `GET /api/dsh-mcp-status/servers` | 快照：每行的状态、工具数、传输与地址、来源补丁文件、超时与重连策略 |
+| `GET /api/dsh-mcp-status/summary` | 侧栏角标用的聚合摘要（`worst` / `counts` / `names` / `signature`）；**读缓存、不强制重采、不探活** |
 | `POST /api/dsh-mcp-status/toggle` | `{ id, enabled }`：改补丁行 → 等热重载 → 返回新状态（超时后主动重排一次） |
 | `POST /api/dsh-mcp-status/retry` | `{ id }`：真正重新挂载这一行（`dispose` 旧 fiber + `init` 冷启动，重连预算清零），不是等 HMR 碰运气 |
 | `POST /api/dsh-mcp-status/test` | `{ id }`：真握手，返回协议版本 / serverInfo / 工具数 / 失败原因 |
@@ -93,10 +95,23 @@ per-agent 作用域、全局注册表看不见，把它当断线会误报也会�
     guardUnreachable: true  # 是否拦截发往不可用服务器的工具调用
 ```
 
+## 侧栏状态点
+
+面板是商品，侧栏那一行是产品：要先在门口看见，才有人点进门。
+
+- **形状**：图标不变，右上角加一个 6 px 的点。红=有服务器不可用（`unreachable` / `failed`），黄=正在重连（`reconnecting`）；
+  **全好时没有点**——没有消息就是好消息，比一个常年发绿的点更可信。悬停给出明细（`已连接 2/5 · 1 台要处理：unityMCP`）。
+- **变化才闪**：状态变差时点脉冲一次（0.9 s）；`prefers-reduced-motion` 下不播动画。恢复健康不庆祝。
+- **收起态**：侧栏折叠时，顶部的展开按钮上出现同色小点（`sidebar.toggle.badge`）；全好时该槽不渲染任何东西。
+- **5 s 一次**`GET /summary`：只读宿主缓存，不探活、不强制重采；页面不可见时暂停轮询，切回前台立即拉一次。
+  面板的 `/servers` 仍然每次当场重采——角标不该为一个 6 px 的点打风暴。
+- **红线**：判定仍然只来自 `resolveStatus`，`summarizeServers` 只做聚合。`idle`（没有工具）与 `disabled`
+  不会让点变红，和调用闸门的放行规则一致（A3）。
+
 ## 显示约定
 
 - 样式只用 `--dsw-alias-*` 主题令牌，跟随宿主明暗主题；文案走 `ctx.locale`（zh / en）。
-- 状态色：绿=已连接；红=未连接/不可达/加载失败；黄（呼吸）=启动中/重连中；灰=已停用。
+- 状态色：绿=已连接；红=未连接/不可达/加载失败；黄（呼吸）=启动中/重连中；灰=已停用。侧栏点只用红/黄两档，见上节。
 - 顶栏副标题显示的是「状态变化 Ns 前」：面板每 4 s 轮询，但快照里的 `checkedAt` 每次拉取都会刷新，
   所以它不表示新鲜度，只在某一行状态真的变了时计时。
 - 「不可达」= 端口连不上，或最近一次测试失败：徽标立即变红，展开区给出原因；若工具还挂在注册表里，会单独说明那是上一次连接的残留。

@@ -21,6 +21,8 @@ window.__ModuleLoader__.load({
     const PANEL_ORDER = 40;
     const API = '/api/dsh-mcp-status';
     const POLL_MS = 4000;
+    /** 侧栏角标的轮询周期：比面板慢一档，读的是 /summary（不探活、不强制重采）。 */
+    const DOCK_POLL_MS = 5000;
 
     /* ------------------------------------------------------------------ *
      * 文案
@@ -113,6 +115,14 @@ window.__ModuleLoader__.load({
       'toggle.disabled': '已停用',
       'test.ok': '连接成功：{n} 个工具，耗时 {ms} ms',
       'test.fail': '连接失败',
+      'dock.loading': '读取 MCP 状态…',
+      'dock.empty': '还没有配置 MCP 服务器',
+      'dock.connectedOf': '已连接 {n}/{total}',
+      'dock.attention': '{n} 台要处理：{names}',
+      'dock.more': '等 {n} 台',
+      'dock.pending': '{n} 台正在连接',
+      'dock.idle': '{n} 台没有工具',
+      'dock.disabled': '{n} 台已停用',
     };
 
     const EN = {
@@ -202,6 +212,14 @@ window.__ModuleLoader__.load({
       'toggle.timeout': 'Still connecting; the list refreshes automatically',
       'test.ok': 'Connected: {n} tools in {ms} ms',
       'test.fail': 'Connection failed',
+      'dock.loading': 'Reading MCP state…',
+      'dock.empty': 'No MCP server configured',
+      'dock.connectedOf': '{n}/{total} connected',
+      'dock.attention': '{n} need attention: {names}',
+      'dock.more': '+{n} more',
+      'dock.pending': '{n} connecting',
+      'dock.idle': '{n} with no tools',
+      'dock.disabled': '{n} disabled',
     };
 
     /* ------------------------------------------------------------------ *
@@ -262,6 +280,13 @@ window.__ModuleLoader__.load({
 .mcpPanel-note[data-tone=ok]{color:var(--dsw-alias-state-success-primary)}
 .mcpPanel-empty{border:.5px dashed var(--dsw-alias-border-l2);border-radius:10px;padding:26px 20px;text-align:center;display:flex;flex-direction:column;gap:6px;color:var(--dsw-alias-label-secondary);font-size:12.5px}
 .mcpPanel-emptyTitle{color:var(--dsw-alias-label-primary);font-size:13.5px;font-weight:600}
+.mcpDock{position:relative;display:inline-flex;align-items:center;justify-content:center;color:inherit}
+.mcpDock-dot{position:absolute;top:-1px;right:-3px;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-warn-primary);box-shadow:0 0 0 1.5px var(--dsw-alias-bg-base);animation:mcpDockPulse .9s ease-out 1}
+.mcpDock[data-tone=bad] .mcpDock-dot{background:var(--dsw-alias-state-error-primary)}
+.mcpDock-rail{width:6px;height:6px;border-radius:50%;flex:none;background:var(--dsw-alias-state-warn-primary);margin:-14px 0 0 -6px}
+.mcpDock-rail[data-tone=bad]{background:var(--dsw-alias-state-error-primary)}
+@keyframes mcpDockPulse{0%{transform:scale(1)}35%{transform:scale(1.9)}100%{transform:scale(1)}}
+@media (prefers-reduced-motion: reduce){.mcpDock-dot{animation:none}}
 `;
 
     /* ------------------------------------------------------------------ *
@@ -298,6 +323,157 @@ window.__ModuleLoader__.load({
         throw new Error(payload?.error ?? `HTTP ${response.status}`);
       }
       return payload;
+    }
+
+    /* ------------------------------------------------------------------ *
+     * 侧栏角标
+     *
+     * 侧栏行的文字由宿主按 locale 派生，不随数据变化，所以状态只能画在 16px 的图标上；
+     * 图标是组件（宿主经 renderSlot('sidebar.panellist') 渲染），因此它能自己订阅、自己重渲染。
+     * 数据走 /summary：读缓存、不探活，5 s 一次，页面隐藏时暂停。
+     * ------------------------------------------------------------------ */
+
+    /** 音调排序，只用于「这次比上次更糟吗」——状态本身仍由宿主判定（A1）。 */
+    function dockSeverity(tone) {
+      if (tone === 'bad') return 3;
+      if (tone === 'warn') return 2;
+      if (tone === 'idle') return 1;
+      return 0;
+    }
+
+    /** 一句话把摘要讲完：16px 里放不下的东西全放进 hover 提示。 */
+    function dockTitle(t, summary) {
+      if (summary === null || summary === undefined) return t('dock.loading');
+      const counts = summary.counts ?? {};
+      if ((counts.total ?? 0) === 0) return t('dock.empty');
+
+      const parts = [t('dock.connectedOf', { n: counts.connected ?? 0, total: counts.total })];
+      const retrying = counts.reconnecting ?? 0;
+      const unhealthy = counts.unhealthy ?? 0;
+      if (retrying + unhealthy > 0) {
+        const names = (summary.names ?? []).join(', ');
+        const more = summary.more ?? 0;
+        parts.push(t('dock.attention', {
+          n: retrying + unhealthy,
+          names: more > 0 ? names + ' ' + t('dock.more', { n: more }) : names,
+        }));
+      }
+      if ((counts.pending ?? 0) > 0) parts.push(t('dock.pending', { n: counts.pending }));
+      if ((counts.idle ?? 0) > 0) parts.push(t('dock.idle', { n: counts.idle }));
+      if ((counts.disabled ?? 0) > 0) parts.push(t('dock.disabled', { n: counts.disabled }));
+      return parts.join(' · ');
+    }
+
+    function createSummaryStore() {
+      const listeners = new Set();
+      let snapshot = { loading: true, summary: null, error: null, pulseAt: 0 };
+      let timer;
+      let inflight;
+      let lastSeverity = null;
+
+      const publish = (patch) => {
+        snapshot = { ...snapshot, ...patch };
+        for (const listener of listeners) {
+          try {
+            listener();
+          } catch {
+            /* 一个订阅者坏掉不该拖垮另一个 */
+          }
+        }
+      };
+
+      const load = () => {
+        if (inflight !== undefined) return inflight;
+        inflight = requestJson('/summary', { method: 'GET' })
+          .then((payload) => {
+            const severity = dockSeverity(payload?.worst);
+            // 只在变差时脉冲；恢复健康不在侧栏里放礼花。
+            const worsened = lastSeverity !== null && severity > lastSeverity;
+            lastSeverity = severity;
+            publish({
+              loading: false,
+              error: null,
+              summary: payload,
+              pulseAt: worsened ? Date.now() : snapshot.pulseAt,
+            });
+          })
+          .catch((error) => {
+            // 拿不到摘要就保留上一份：宁可显示略旧的真话，也不要因为一次 500 把点抹掉。
+            publish({ loading: false, error: error?.message ?? String(error) });
+          })
+          .finally(() => {
+            inflight = undefined;
+          });
+        return inflight;
+      };
+
+      const onVisibility = () => {
+        if (document.visibilityState === 'visible') load();
+      };
+
+      const start = () => {
+        load();
+        document.addEventListener('visibilitychange', onVisibility);
+        timer = setInterval(() => {
+          if (document.visibilityState === 'visible') load();
+        }, DOCK_POLL_MS);
+      };
+
+      const stop = () => {
+        if (timer !== undefined) clearInterval(timer);
+        timer = undefined;
+        document.removeEventListener('visibilitychange', onVisibility);
+      };
+
+      return {
+        getSnapshot: () => snapshot,
+        subscribe(listener) {
+          listeners.add(listener);
+          // 侧栏收起时这一行仍在树上（只是变窄），所以按订阅者数量、不按可见性决定轮询开关。
+          if (listeners.size === 1) start();
+          return () => {
+            listeners.delete(listener);
+            if (listeners.size === 0) stop();
+          };
+        },
+      };
+    }
+
+    const summaryStore = createSummaryStore();
+
+    function useSummary() {
+      const [state, setState] = useState(summaryStore.getSnapshot);
+      useEffect(() => summaryStore.subscribe(() => setState(summaryStore.getSnapshot())), []);
+      return state;
+    }
+
+    /** 侧栏那一行的图标：本体不变，右上角长出状态点。 */
+    function StatusGlyph({ size = 18, t }) {
+      const state = useSummary();
+      const summary = state.summary;
+      const tone = summary?.worst ?? 'empty';
+      const attention = tone === 'bad' || tone === 'warn';
+      return h(
+        'span',
+        { className: 'mcpDock', 'data-tone': tone, title: dockTitle(t, summary) },
+        h(Glyph, { size }),
+        // key 换成新的 pulseAt 会让节点重建一次，CSS 动画因此只播一次。
+        attention ? h('span', { key: String(state.pulseAt), className: 'mcpDock-dot', 'aria-hidden': true }) : null,
+      );
+    }
+
+    /** 收起态：展开按钮上的点。只提示，不改变按钮行为。 */
+    function ToggleBadge({ t }) {
+      const state = useSummary();
+      const summary = state.summary;
+      const tone = summary?.worst ?? 'empty';
+      if (tone !== 'bad' && tone !== 'warn') return null;
+      return h('span', {
+        className: 'mcpDock-rail',
+        'data-tone': tone,
+        title: dockTitle(t, summary),
+        'aria-hidden': true,
+      });
     }
 
     /* ------------------------------------------------------------------ *
@@ -804,7 +980,14 @@ window.__ModuleLoader__.load({
           order: PANEL_ORDER,
           label: () => t('panel.title'),
           locale: NS,
-        }, ({ size = 18 }) => h(Glyph, { size })));
+        }, ({ size = 18 }) => h(StatusGlyph, { size, t })));
+
+        // 侧栏收起时，顶部展开按钮上的状态点（宿主声明为可选、不可交互）。
+        // 全好时不注册任何东西：没有点就是没有坏事，比一个常年发绿的点更可信。
+        ctx.slots.inject('sidebar.toggle.badge', () => ctx.slots.register({
+          name: 'sidebar.toggle.badge',
+          locale: NS,
+        }, () => h(ToggleBadge, { t })));
 
         ctx.slots.inject('main', () => ctx.slots.register({
           name: 'main',

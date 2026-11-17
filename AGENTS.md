@@ -34,7 +34,7 @@ dsh plugin --profile <profile> add dsh-mcp-status    # 装了 npm 包之后
 | 路径 | 作用 |
 | --- | --- |
 | `index.js` | 宿主半体：采集快照、四个 HTTP 路由、system prompt 摘要、`ctx.tools.guard`、开关/重试动作、补丁文件行级编辑。 |
-| `client.js` | 浏览器半体：`sidebar.panellist` 一行 + `main` 面板（key 同 id），React 组件、CSS、中英文文案。 |
+| `client.js` | 浏览器半体：`sidebar.panellist` 一行（含状态点）+ 收起态 `sidebar.toggle.badge` + `main` 面板（key 同 id），React 组件、CSS、中英文文案。 |
 | `lib/status.js` | **纯函数层**：`DEFAULT_CONFIG`、`normalizeConfig`、`resolveStatus`、`decideGuard`、`buildHealthText`、`serverNameFromTool`、`sectionOrder`。不 import 任何宿主 API。 |
 | `lib/probe.js` | 自带 MCP JSON-RPC 探针（stdio 换行分帧 / streamable-http + SSE），`probeServer(config, { timeoutMs })`。 |
 | `test/status.test.mjs` | 状态判定、闸门、摘要、配置归一化的断言（无框架，自带 `check/eq`）。 |
@@ -47,7 +47,7 @@ dsh plugin --profile <profile> add dsh-mcp-status    # 装了 npm 包之后
 
 违反下面任何一条，都会以「面板显示与真相对不上」的形式爆炸——这是这个项目最主要的 bug 类型。
 
-**A1. 只有一处状态判定。** `lib/status.js#resolveStatus` 是唯一决定 `state/reason` 的地方。面板只负责渲染 DTO，prompt 摘要和闸门只读同一份快照。**不要**在 `client.js` 里根据工具数、颜色、按钮状态再推一遍，也不要在 `index.js` 的路由里临时改判定。
+**A1. 只有一处状态判定。** `lib/status.js#resolveStatus` 是唯一决定 `state/reason` 的地方（`summarizeServers` 只把已有判定聚合成侧栏角标，不重新推导状态）。面板只负责渲染 DTO，prompt 摘要和闸门只读同一份快照。**不要**在 `client.js` 里根据工具数、颜色、按钮状态再推一遍，也不要在 `index.js` 的路由里临时改判定。
 
 **A2. 宿主状态优先。** `dsh-mcp-client` 自己维护连接状态机（`connectionStatusOf(fiber)`：`connecting / connected / reconnecting(attempt,maxAttempts) / failed(reason) / closed / waiting-credentials`），它是「到底连上没有」的唯一权威。我们的 TCP 探活、`/test` 握手结果只是旁证；**探针成功绝不能把宿主已经放弃的连接说成已连接**（v0.2.0 的假绿 bug 就是这么来的，`test/status.test.mjs` 里有专门的回归用例 `gave-up beats a successful probe`）。
 
@@ -98,6 +98,7 @@ dsh plugin --profile <profile> add dsh-mcp-status    # 装了 npm 包之后
 | 方法 | 路径 | 请求 | 响应 |
 | --- | --- | --- | --- |
 | GET | `/servers` | — | `{ ok, servers: DTO[], patchFiles[], checkedAt }`（整个快照展开），且强制重采一次 |
+| GET | `/summary` | — | `{ ok, worst, counts, attention[], names[], more, signature, checkedAt }`；侧栏角标每 5 s 轮询，**只读缓存不强制重采** |
 | POST | `/toggle` | `{ id, enabled }` | `{ ok, state, settled, server }` |
 | POST | `/retry` | `{ id }` | `{ ok, state, settled, attempts, restarted, server }`；行在补丁文件里被停用时返回 400 + 中文原因 |
 | POST | `/test` | `{ id }` | `{ ok, toolsCount, serverInfo, protocolVersion }` 或 `{ ok: false, error }` |
@@ -121,7 +122,7 @@ DTO 关键字段：`id`、`entryPath`、`serverName`、`state`、`reason`、`evi
 
 ## 客户端约定
 
-- 半体通过 `window.__ModuleLoader__.load({ id, factory })` 注册，`factory` 返回 `{ name, inject: ['slots', 'locale'], apply }`；面板注册到 `sidebar.panellist` 与 `main`（两者用同一个 id）。
+- 半体通过 `window.__ModuleLoader__.load({ id, factory })` 注册，`factory` 返回 `{ name, inject: ['slots', 'locale'], apply }`；面板注册到 `sidebar.panellist` 与 `main`（两者用同一个 id），收起态角标注册到 `sidebar.toggle.badge`（该槽是 single/root，只在 `!wide` 时渲染，props 为空）。
 - 文案：中英文都写在 `locale/*.json` 的 `dsh-mcp-status` 命名空间下；组件里用 `t('key')`，不要写字面量中文/英文。新增 key 要两边都加。
 - 样式：只用 `--dsw-alias-*` 主题令牌，跟随宿主明暗；不要引入 CSS 框架、不要写死颜色。
 - 组件只消费 DTO，不计算状态（A1）。按钮的可用性、徽标颜色、hint 文案都由 `state`/`reason`/`connection` 决定。
@@ -149,7 +150,7 @@ curl -s -X POST http://127.0.0.1:<port>/api/dsh-mcp-status/retry \
 #    若返回 restart-required → 必须重启 DSH
 ```
 
-面板侧：侧边栏「MCP 服务器」→ 顶栏应显示「N MCP」或「N MCP · 状态变化 Ns 前」，每行有状态点、工具数、测试/配置/开关；展开行能看到「连接状态」「判定」「依据」。
+面板侧：侧边栏「MCP 服务器」→ 顶栏应显示「N MCP」或「N MCP · 状态变化 Ns 前」，每行有状态点、工具数、测试/配置/开关；展开行能看到「连接状态」「判定」「依据」。侧栏那一行的图标右上角另有一个 6 px 状态点（有坏行才出现），收起侧栏后顶部的展开按钮上有同色小点。
 
 ## 发布
 

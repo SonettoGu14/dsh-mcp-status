@@ -19,6 +19,7 @@ import {
   resolveStatus,
   sectionOrder,
   serverNameFromTool,
+  summarizeServers,
 } from '../lib/status.js';
 
 const NOW = 1_700_000_000_000;
@@ -560,7 +561,104 @@ const cases = [
     assert.equal(sectionOrder(undefined), 50);
     assert.equal(sectionOrder({ getSectionOrder: () => '7' }, 'MCP_SERVERS', 50), 50);
   }],
+
+  // ------------------------------------------------------------ summarizeServers
+  //
+  // 这是侧栏角标唯一的输入。它只做聚合，所以用例守的是「哪些状态配点亮侧栏」这条边界，
+  // 尤其是 A3：idle（没有工具）不是断线，绝不能让侧栏变红。
+
+  ['summarizeServers: all connected → ok, no attention', () => {
+    const summary = summarizeServers([
+      { id: 'a', serverName: 'alpha', state: 'connected', reason: 'connected' },
+      { id: 'b', serverName: 'beta', state: 'connected', reason: 'connected' },
+    ]);
+    assert.equal(summary.worst, 'ok');
+    assert.equal(summary.counts.total, 2);
+    assert.equal(summary.counts.connected, 2);
+    assert.deepEqual(summary.names, []);
+    assert.equal(summary.attention.length, 0);
+  }],
+
+  ['summarizeServers: failed → bad, with name and reason', () => {
+    const summary = summarizeServers([
+      { id: 'u', serverName: 'unityMCP', state: 'failed', reason: 'gave-up' },
+      { id: 'a', serverName: 'alpha', state: 'connected', reason: 'connected' },
+    ]);
+    assert.equal(summary.worst, 'bad');
+    assert.equal(summary.counts.unhealthy, 1);
+    assert.deepEqual(summary.names, ['unityMCP']);
+    assert.equal(summary.attention[0].reason, 'gave-up');
+  }],
+
+  ['summarizeServers: reconnecting alone → warn, failed outranks it', () => {
+    const warn = summarizeServers([{ id: 'a', serverName: 'alpha', state: 'reconnecting', reason: 'client-reconnecting' }]);
+    assert.equal(warn.worst, 'warn');
+    assert.equal(warn.counts.reconnecting, 1);
+
+    const bad = summarizeServers([
+      { id: 'a', serverName: 'alpha', state: 'reconnecting', reason: 'client-reconnecting' },
+      { id: 'b', serverName: 'beta', state: 'unreachable', reason: 'tcp-refused' },
+    ]);
+    assert.equal(bad.worst, 'bad');
+    // 先出现的 warn 不能让后面更糟的 bad 被吞掉
+    assert.equal(bad.attention.length, 2);
+  }],
+
+  ['summarizeServers: idle/pending are not errors (A3)', () => {
+    const idle = summarizeServers([{ id: 'a', serverName: 'alpha', state: 'idle', reason: 'no-tools' }]);
+    assert.equal(idle.worst, 'idle');
+    assert.equal(idle.counts.unhealthy, 0);
+    assert.equal(idle.counts.reconnecting, 0);
+    assert.deepEqual(idle.names, []);
+
+    const pending = summarizeServers([{ id: 'a', serverName: 'alpha', state: 'pending', reason: 'pending' }]);
+    assert.equal(pending.worst, 'idle');
+    assert.deepEqual(pending.names, []);
+
+    // 和闸门对齐：同一行 decideGuard 放行，角标就不该亮。
+    const row = { state: 'idle', reason: 'no-tools', serverName: 'alpha', connection: undefined };
+    assert.equal(decideGuard({ toolName: 'mcp__alpha__ping', row, snapshotAt: NOW, now: NOW }), undefined);
+    assert.notEqual(idle.worst, 'bad');
+  }],
+
+  ['summarizeServers: disabled excluded, empty and unknown stay quiet', () => {
+    const disabled = summarizeServers([{ id: 'a', serverName: 'alpha', state: 'disabled', reason: 'disabled' }]);
+    assert.equal(disabled.worst, 'disabled');
+    assert.equal(disabled.counts.disabled, 1);
+    assert.deepEqual(disabled.names, []);
+
+    const empty = summarizeServers([]);
+    assert.equal(empty.worst, 'empty');
+    assert.equal(empty.counts.total, 0);
+
+    // 宿主给了没见过的新状态：不猜、不报警，只记个数。
+    const unknown = summarizeServers([{ id: 'a', serverName: 'alpha', state: 'brand-new-state' }]);
+    assert.equal(unknown.counts.unknown, 1);
+    assert.deepEqual(unknown.names, []);
+    assert.equal(unknown.worst, 'empty');
+  }],
+
+  ['summarizeServers: names are capped, the rest become a count', () => {
+    const rows = Array.from({ length: 5 }, (_, index) => ({
+      id: `s${index}`, serverName: `srv${index}`, state: 'failed', reason: 'client-failed',
+    }));
+    const summary = summarizeServers(rows, { maxNames: 2 });
+    assert.deepEqual(summary.names, ['srv0', 'srv1']);
+    assert.equal(summary.more, 3);
+    assert.equal(summary.attention.length, 2);
+  }],
+
+  ['summarizeServers: signature tracks state and reason changes', () => {
+    const rows = [{ id: 'a', serverName: 'alpha', state: 'connected', reason: 'connected' }];
+    const before = summarizeServers(rows).signature;
+    const after = summarizeServers([
+      { id: 'a', serverName: 'alpha', state: 'failed', reason: 'client-failed' },
+    ]).signature;
+    assert.notEqual(before, after);
+    assert.equal(summarizeServers(rows).signature, before);
+  }],
 ];
+
 
 let failed = 0;
 for (const [name, body] of cases) {

@@ -32,6 +32,7 @@ import {
   resolveStatus,
   sectionOrder,
   serverNameFromTool,
+  summarizeServers,
 } from './lib/status.js';
 import { probeServer } from './lib/probe.js';
 
@@ -764,6 +765,29 @@ export function apply(ctx, rawConfig) {
             // 面板每次拉取都当场重采：探活有 2 s 缓存、其它全是内存读取，成本可忽略。
             const snapshot = await tracker.refresh(true);
             return sendJson(response, 200, { ok: true, ...snapshot });
+          } catch (error) {
+            return sendJson(response, 500, { ok: false, error: error?.message ?? String(error) });
+          }
+        },
+      }),
+      // 侧栏角标用的轻量摘要：读缓存、不强制重采、不探活。
+      //
+      // 角标每 5 s 问一次，而 /servers 每次都要当场重采（探活 + 工具表扫描）。让角标改用这条
+      // 路由，后台 refreshMs 循环负责续期，用户没打开面板时不会因为一个 6 px 的点而打风暴。
+      ctx.webServer.register({
+        kind: 'exact',
+        path: `${ROUTE_BASE}/summary`,
+        handler: async (request, response) => {
+          const rejection = gate(request, { method: 'GET', write: false });
+          if (rejection !== undefined) return sendJson(response, rejection.status, { ok: false, error: rejection.error });
+          try {
+            // 非强制：新鲜就返回缓存，过期才采一次（仍然受 refreshMs 节流）。
+            const snapshot = await tracker.refresh(false);
+            return sendJson(response, 200, {
+              ok: true,
+              ...summarizeServers(snapshot.servers),
+              checkedAt: snapshot.checkedAt,
+            });
           } catch (error) {
             return sendJson(response, 500, { ok: false, error: error?.message ?? String(error) });
           }
