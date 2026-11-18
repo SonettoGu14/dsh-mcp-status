@@ -16,8 +16,10 @@
 
 ```bash
 npm test                                   # 状态判定 + 探针，零依赖纯 node
+npm run check                              # 提交前跑这个：node --check ×4 + 上面两个测试
 node test/status.test.mjs                  # 只跑状态/闸门/摘要
 node lib/probe.test.mjs                    # 只跑探针（起假 stdio/http 服务器）
+npm run release patch -- --dry-run         # 发版前演练：只检查、只打印命令
 ```
 
 装进本机的某个 profile 调试（`<本目录>` 用这个仓库的绝对路径）：
@@ -33,7 +35,7 @@ dsh plugin --profile <profile> add dsh-mcp-status    # 装了 npm 包之后
 
 | 路径 | 作用 |
 | --- | --- |
-| `index.js` | 宿主半体：采集快照、四个 HTTP 路由、system prompt 摘要、`ctx.tools.guard`、开关/重试动作、补丁文件行级编辑。 |
+| `index.js` | 宿主半体：采集快照、五个 HTTP 路由（`/servers`、`/summary`、`/toggle`、`/retry`、`/test`）、system prompt 摘要、`ctx.tools.guard`、开关/重试动作、补丁文件行级编辑。 |
 | `client.js` | 浏览器半体：`sidebar.panellist` 一行（含状态点）+ 收起态 `sidebar.toggle.badge` + `main` 面板（key 同 id），React 组件、CSS、中英文文案。 |
 | `lib/status.js` | **纯函数层**：`DEFAULT_CONFIG`、`normalizeConfig`、`resolveStatus`、`decideGuard`、`buildHealthText`、`serverNameFromTool`、`sectionOrder`。不 import 任何宿主 API。 |
 | `lib/probe.js` | 自带 MCP JSON-RPC 探针（stdio 换行分帧 / streamable-http + SSE），`probeServer(config, { timeoutMs })`。 |
@@ -41,6 +43,8 @@ dsh plugin --profile <profile> add dsh-mcp-status    # 装了 npm 包之后
 | `lib/probe.test.mjs` | 探针用例，靠 `test/fixtures/echo-stdio.mjs` 和内置 http server。 |
 | `locale/{zh,en}.json` | 客户端文案；**所有用户可见文字都必须走这里**。 |
 | `cordis.patch.yml` | 安装时插入的插件行，id 固定为 `mcp-status`。 |
+| `.github/workflows/publish.yml` | tag 触发的发布流水线：OIDC 换 npm 凭据、校验 tag 与版本一致、建 GitHub Release。**文件名被 npm 的 trust connection 锁死**。 |
+| `scripts/release.mjs` | `npm run release`：检查仓库状态 → `npm run check` → `npm version` → push branch + tag。 |
 | `README.md` | 用户文档：状态表、配置、安装、已知边界。改行为要同步改它。 |
 
 ## 架构不变量
@@ -136,7 +140,7 @@ DTO 关键字段：`id`、`entryPath`、`serverName`、`state`、`reason`、`evi
 - 不引入测试框架：`node --test` 也不用，保持 `node xxx.mjs` 直接可跑、退出码正确。
 - `lib/status.js` 的每个分支都要有断言；新状态/新 reason 必须配回归用例，并说明它防的是什么 bug（现有用例的注释就是范例）。
 - 探针用例涉及 I/O，用 fixture 起真进程 / 真 http server，不要 mock 成 `JSON.parse` 小把戏。
-- 提交前：`npm test` 全绿 + `node --check index.js && node --check client.js && node --check lib/status.js`。
+- 提交前：`npm run check`（= `node --check` ×4 + `npm test`）全绿，退出码 0。
 
 ## 本地验证 recipe
 
@@ -160,15 +164,26 @@ curl -s -X POST http://127.0.0.1:<port>/api/dsh-mcp-status/retry \
 打一个 tag，GitHub Actions 用 OIDC（npm Trusted Publishing）发布；本机不留、也不需要可直发的 npm token：
 
 ```bash
-npm run release patch                # 也会用在 minor / major / 0.4.0
+npm run release patch                # 或 minor / major / 0.4.0
 npm run release patch -- --dry-run   # 只检查、只打印将执行的命令
 ```
 
 链路：`scripts/release.mjs`（工作区干净 → 在 main 上 → 与 origin 同步 → `npm run check` → `npm version` 提交并打 `v<ver>` tag → `git push origin main --follow-tags`）→ `.github/workflows/publish.yml`（校验 tag 与 package.json 一致 → `npm publish --access public` → `gh release create --generate-notes`）。
 
-- npm 侧一次性配置在 `https://www.npmjs.com/package/dsh-mcp-status/access` → Trusted Publisher：`SonettoGu14` / `dsh-mcp-status` / `publish.yml`，并勾 **Allow npm publish**。**连接建好不可编辑**，换 workflow 文件名等于删掉重建；页面显示 "Pending validation" 时，发布一次即完成校验。
+- npm 侧一次性配置在 `https://www.npmjs.com/package/dsh-mcp-status/access` → Trusted Publisher：`SonettoGu14` / `dsh-mcp-status` / `publish.yml`，并勾 **Allow npm publish**。**连接建好不可编辑**，换 workflow 文件名等于删掉重建。
+  **现状（2026-11-18）**：连接已建成并 `Status: Valid`（第一次发布即完成校验），v0.3.0 就是由它发出的。该账号的 2FA 是 **security key**（不是 6 位 OTP），所以这类网页配置只能在有人的浏览器里点：`browse` 扩展驱动本机 Chrome，点完提交后由本人碰一下安全钥匙。
 - workflow 的 `permissions` 必须是 `id-token: write`（OIDC）+ `contents: write`（Release），npm CLI 要 `>= 11.5.1`（所以有 `npm install -g npm@^11.5.1`），**不要**给 `setup-node` 设 `registry-url`（会生成带空 `NODE_AUTH_TOKEN` 的 `.npmrc`），workflow 另外 `rm -f .npmrc` 兜底。
 - 版本号发布后不可复用：重复 publish 会 403。CI 失败先确认版本是不是已经上去了，再决定改版本还是重跑；`npm view` 有 1~3 分钟延迟，别急着改代码。
+- 脚本要求**先把手头的提交 push 上去**：它只允许「本地和 origin/main 一致」时发版，否则报「本地领先 origin/main，先 push」。一次典型发版（CI 约 30 s）：
+
+  ```bash
+  gh run list --workflow publish.yml --limit 3
+  gh run view <run-id> --log | grep -E 'Publishing to|provenance|dsh-mcp-status@'
+  curl -s https://registry.npmjs.org/-/package/dsh-mcp-status/dist-tags   # {"latest":"x.y.z"}
+  gh release view v<x.y.z> --json tagName,url -q '.tagName + " " + .url'
+  ```
+
+  日志里该出现 `npm notice publish Signed provenance statement` 与 `+ dsh-mcp-status@x.y.z`；Release 那步会打印 `https://github.com/SonettoGu14/dsh-mcp-status/releases/tag/v<x.y.z>`。
 - 兜底本机直发：`npm run release patch -- --local-publish`，依赖 `~/.npmrc` 里一把勾了 Bypass 2FA 的 granular token。不是默认路径（这类 token 正在被逐步废弃）。
 - 国内网络 push 可能断在 "HTTP2 framing layer"：`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.version GIT_CONFIG_VALUE_0=HTTP/1.1` 加 `https_proxy/http_proxy/all_proxy`（7897）可过；脚本内部起的 `git fetch` 也吃这些环境变量。
 - 首次/新包名会先进 staged 审核（registry 上临时出现 `0.0.0-stage`），几分钟后自动切 `latest`；用 `curl https://registry.npmjs.org/-/package/dsh-mcp-status/dist-tags` 确认。
