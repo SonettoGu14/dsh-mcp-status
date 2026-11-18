@@ -1,0 +1,47 @@
+name: publish
+
+# 打 tag 即发布：git push --follow-tags 之后由 GitHub Actions 用 OIDC
+# (Trusted Publishing) 把包发到 npm，并建 GitHub Release。
+# 本机不再保存可直发的 npm token。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # Trusted Publishing 需要的 OIDC 令牌
+  contents: write   # gh release create
+
+concurrency:
+  group: publish-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'        # 特意不写 registry-url：它会生成空 NODE_AUTH_TOKEN 的 .npmrc
+
+      # Trusted Publishing 要求 npm CLI >= 11.5.1（Node 22 自带的是 10.x）
+      - name: Upgrade npm
+        run: npm install -g npm@^11.5.1
+
+      - name: Tag matches package.json
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
+
+      - name: Checks
+        run: |
+          npm run check
+          rm -f .npmrc
+
+      - name: Publish (trusted publishing, no token)
+        run: npm publish --access public
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
