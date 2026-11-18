@@ -280,6 +280,15 @@ window.__ModuleLoader__.load({
 .mcpPanel-note[data-tone=ok]{color:var(--dsw-alias-state-success-primary)}
 .mcpPanel-empty{border:.5px dashed var(--dsw-alias-border-l2);border-radius:10px;padding:26px 20px;text-align:center;display:flex;flex-direction:column;gap:6px;color:var(--dsw-alias-label-secondary);font-size:12.5px}
 .mcpPanel-emptyTitle{color:var(--dsw-alias-label-primary);font-size:13.5px;font-weight:600}
+`;
+
+    /**
+     * 侧栏角标的样式挂在宿主 <head> 上，不跟面板走。
+     *
+     * 面板切到别的视图时会被卸载，侧栏那一行却还在；样式若跟着面板走，那时 DOM 里
+     * 只剩一个没有宽度和颜色的空 span —— 点等于消失（用户看到的就是「只有打开面板才有红点」）。
+     */
+    const DOCK_CSS = `
 .mcpDock{position:relative;display:inline-flex;align-items:center;justify-content:center;color:inherit}
 .mcpDock-dot{position:absolute;top:-1px;right:-3px;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-warn-primary);box-shadow:0 0 0 1.5px var(--dsw-alias-bg-base);animation:mcpDockPulse .9s ease-out 1}
 .mcpDock[data-tone=bad] .mcpDock-dot{background:var(--dsw-alias-state-error-primary)}
@@ -973,6 +982,15 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, { zh: ZH, en: EN }), 'dsh-mcp-status: dictionaries');
         const t = ctx.locale.bind(NS);
+
+        // 角标样式必须挂在 <head>：面板切走后会被卸载，侧栏那一行还在，样式一没点就画不出来。
+        ctx.effect(() => {
+          const style = document.createElement('style');
+          style.setAttribute('data-dsh-plugin', `${NS}-dock`);
+          style.textContent = DOCK_CSS;
+          document.head.appendChild(style);
+          return () => style.remove();
+        }, 'dsh-mcp-status: dock styles');
 
         ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',

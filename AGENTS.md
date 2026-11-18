@@ -125,6 +125,9 @@ DTO 关键字段：`id`、`entryPath`、`serverName`、`state`、`reason`、`evi
 - 半体通过 `window.__ModuleLoader__.load({ id, factory })` 注册，`factory` 返回 `{ name, inject: ['slots', 'locale'], apply }`；面板注册到 `sidebar.panellist` 与 `main`（两者用同一个 id），收起态角标注册到 `sidebar.toggle.badge`（该槽是 single/root，只在 `!wide` 时渲染，props 为空）。
 - 文案：中英文都写在 `locale/*.json` 的 `dsh-mcp-status` 命名空间下；组件里用 `t('key')`，不要写字面量中文/英文。新增 key 要两边都加。
 - 样式：只用 `--dsw-alias-*` 主题令牌，跟随宿主明暗；不要引入 CSS 框架、不要写死颜色。
+- **面板会卸载，侧栏不会**：面板切到会话/别的插件时整棵树被卸载，而 `sidebar.panellist` 那一行一直在。
+  所以给侧栏行（图标、`sidebar.toggle.badge`）用的 CSS 必须由 `apply()` 挂到 `document.head`，
+  不能只写在面板组件返回的 `<style>` 里——否则离开面板后点还在 DOM 里，却没有尺寸和颜色，等于消失。
 - 组件只消费 DTO，不计算状态（A1）。按钮的可用性、徽标颜色、hint 文案都由 `state`/`reason`/`connection` 决定。
 - 长时间操作（toggle/retry/test）用 `busy` 状态驱动按钮文案，失败要在卡片里显示原因，不要只 `console.error`。
 
