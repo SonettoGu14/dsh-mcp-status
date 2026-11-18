@@ -157,15 +157,20 @@ curl -s -X POST http://127.0.0.1:<port>/api/dsh-mcp-status/retry \
 
 ## 发布
 
+打一个 tag，GitHub Actions 用 OIDC（npm Trusted Publishing）发布；本机不留、也不需要可直发的 npm token：
+
 ```bash
-npm test
-npm version patch -m "chore(release): %s"     # 或 minor/major，版本号不可复用
-npm pack --dry-run                            # 确认 files 白名单与体积
-npm publish --access public
-git push && git push --tags
+npm run release patch                # 也会用在 minor / major / 0.4.0
+npm run release patch -- --dry-run   # 只检查、只打印将执行的命令
 ```
 
-- npm 账号是 `sonettogu14`，开启着 auth-and-writes。**无人值守发布需要 granular token 且勾选 Bypass 2FA**；交互式发布会打印 `https://www.npmjs.com/auth/cli/<uuid>` 并要求在浏览器里确认，可以用 PTY 脚本自动回车（见历史 issue，仓库里不留这种脚本）。
+链路：`scripts/release.mjs`（工作区干净 → 在 main 上 → 与 origin 同步 → `npm run check` → `npm version` 提交并打 `v<ver>` tag → `git push origin main --follow-tags`）→ `.github/workflows/publish.yml`（校验 tag 与 package.json 一致 → `npm publish --access public` → `gh release create --generate-notes`）。
+
+- npm 侧一次性配置在 `https://www.npmjs.com/package/dsh-mcp-status/access` → Trusted Publisher：`SonettoGu14` / `dsh-mcp-status` / `publish.yml`，并勾 **Allow npm publish**。**连接建好不可编辑**，换 workflow 文件名等于删掉重建；页面显示 "Pending validation" 时，发布一次即完成校验。
+- workflow 的 `permissions` 必须是 `id-token: write`（OIDC）+ `contents: write`（Release），npm CLI 要 `>= 11.5.1`（所以有 `npm install -g npm@^11.5.1`），**不要**给 `setup-node` 设 `registry-url`（会生成带空 `NODE_AUTH_TOKEN` 的 `.npmrc`），workflow 另外 `rm -f .npmrc` 兜底。
+- 版本号发布后不可复用：重复 publish 会 403。CI 失败先确认版本是不是已经上去了，再决定改版本还是重跑；`npm view` 有 1~3 分钟延迟，别急着改代码。
+- 兜底本机直发：`npm run release patch -- --local-publish`，依赖 `~/.npmrc` 里一把勾了 Bypass 2FA 的 granular token。不是默认路径（这类 token 正在被逐步废弃）。
+- 国内网络 push 可能断在 "HTTP2 framing layer"：`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.version GIT_CONFIG_VALUE_0=HTTP/1.1` 加 `https_proxy/http_proxy/all_proxy`（7897）可过；脚本内部起的 `git fetch` 也吃这些环境变量。
 - 首次/新包名会先进 staged 审核（registry 上临时出现 `0.0.0-stage`），几分钟后自动切 `latest`；用 `curl https://registry.npmjs.org/-/package/dsh-mcp-status/dist-tags` 确认。
 - `package.json#files` 是白名单：新增运行时文件（如 `lib/*.js`、locale、图标）必须显式加进去，否则发布包里没有。
 - 收录信息：awesome-dsh-plugin 列表条目为 `data/plugins/SonettoGu14__dsh-mcp-status.yml`（category `ui`），发新版本后可按需同步描述。
